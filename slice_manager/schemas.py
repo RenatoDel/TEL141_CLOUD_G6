@@ -63,6 +63,17 @@ class VMResponse(BaseModel):
     class Config:
         from_attributes = True
 
+    @classmethod
+    def from_orm_vm(cls, vm):
+        return cls(
+            vm_uid   = vm.vm_uid,
+            nombre   = vm.nombre,
+            servidor = vm.servidor.nombre,
+            vnc_port = vm.vnc_port,
+            estado   = vm.estado,
+        )
+
+
 class SliceResponse(BaseModel):
     slice_uid:  str
     nombre:     str
@@ -75,6 +86,19 @@ class SliceResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @classmethod
+    def from_orm_slice(cls, s):
+        return cls(
+            slice_uid = s.slice_uid,
+            nombre    = s.nombre,
+            topologia = s.topologia.nombre,
+            vlan_id   = s.vlan_id,
+            cidr      = s.cidr,
+            estado    = s.estado,
+            creado_en = s.creado_en,
+            vms       = [VMResponse.from_orm_vm(vm) for vm in s.vms],
+        )
 
 
 # ------------------------------------------------------------------

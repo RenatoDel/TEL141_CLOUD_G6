@@ -126,20 +126,20 @@ def create_slice(req: SliceCreateRequest, db: Session = Depends(get_db)):
     return {"job_uid": job_uid, "slice_uid": slice_uid}
 
 
-@app.get("/slices", response_model=List[SliceResponse])
+@app.get("/slices")
 def list_slices(db: Session = Depends(get_db)):
     slices = db.query(Slice).filter(
         Slice.estado != EstadoSliceEnum.deleted
     ).all()
-    return slices
+    return [SliceResponse.from_orm_slice(s) for s in slices]
 
 
-@app.get("/slices/{slice_uid}", response_model=SliceResponse)
+@app.get("/slices/{slice_uid}")
 def get_slice(slice_uid: str, db: Session = Depends(get_db)):
     s = db.query(Slice).filter(Slice.slice_uid == slice_uid).first()
     if not s:
         raise HTTPException(status_code=404, detail="Slice no encontrado")
-    return s
+    return SliceResponse.from_orm_slice(s)
 
 
 @app.delete("/slices/{slice_uid}", status_code=status.HTTP_202_ACCEPTED)
