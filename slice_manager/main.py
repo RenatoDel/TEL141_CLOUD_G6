@@ -3,6 +3,12 @@ import uuid
 import logging
 from typing import List
 
+import redis
+from rq import Queue
+
+redis_conn = redis.from_url("redis://localhost:6379")
+job_queue  = Queue("slice_jobs", connection=redis_conn)
+
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -123,6 +129,10 @@ def create_slice(req: SliceCreateRequest, db: Session = Depends(get_db)):
 
     logger.info(f"Slice {slice_uid} creado — job {job_uid} encolado")
 
+    # Encolar en Redis
+    from worker import ejecutar_create_slice
+    job_queue.enqueue(ejecutar_create_slice, job_uid)
+    
     return {"job_uid": job_uid, "slice_uid": slice_uid}
 
 
@@ -162,6 +172,10 @@ def delete_slice(slice_uid: str, db: Session = Depends(get_db)):
     db.commit()
 
     logger.info(f"Slice {slice_uid} marcado para borrado — job {job_uid} encolado")
+
+    # Encolar en Redis
+    from worker import ejecutar_delete_slice
+    job_queue.enqueue(ejecutar_delete_slice, job_uid)
     return {"job_uid": job_uid, "slice_uid": slice_uid}
 
 
