@@ -41,17 +41,16 @@ class TokenResponse(BaseModel):
 # ------------------------------------------------------------------
 
 class SliceCreateRequest(BaseModel):
-    nombre:         str          = Field(..., example="slice-lab4-001")
-    topology:       TopologiaEnum
-    vlan_id:        int          = Field(..., ge=1, le=4094)
-    cidr:           str          = Field(..., example="192.168.100.0/24")
-    vm_count:       int          = Field(..., ge=2, le=10)
-    servers:        List[str]
-    vnc_start:      int          = Field(default=5901)
-    has_internet:   bool         = False
-    has_dhcp:       bool         = False
-    dhcp_start:     Optional[str]= None
-    dhcp_end:       Optional[str]= None
+    nombre:       str           = Field(..., example="slice-lab4-001")
+    topology:     TopologiaEnum
+    vlan_id:      int           = Field(..., ge=1, le=4094)
+    cidr:         str           = Field(..., example="192.168.100.0/24")
+    vm_count:     int           = Field(..., ge=2, le=10)
+    vnc_start:    int           = Field(default=5901)
+    has_internet: bool          = False
+    has_dhcp:     bool          = False
+    dhcp_start:   Optional[str] = None
+    dhcp_end:     Optional[str] = None
 
 class VMResponse(BaseModel):
     vm_uid:   str

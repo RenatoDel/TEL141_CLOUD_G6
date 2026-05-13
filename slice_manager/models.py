@@ -84,9 +84,11 @@ class ServidorFisico(Base):
     vcpus_total  = Column(Integer, nullable=False, default=4)
     ram_total_mb = Column(Integer, nullable=False, default=8192)
     activo       = Column(Boolean, nullable=False, default=True)
+    vcpus_used   = Column(Integer, nullable=False, default=0)
+    ram_used_mb  = Column(Integer, nullable=False, default=0)
+    vms_activas  = Column(Integer, nullable=False, default=0)
 
     vms = relationship("VM", back_populates="servidor")
-
 
 class Slice(Base):
     __tablename__ = "slice"

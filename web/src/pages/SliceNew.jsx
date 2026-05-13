@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useMutation } from '@tanstack/react-query'
+import { createSlice } from '@/api/slices'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -15,7 +17,6 @@ const SERVERS    = ['server1', 'server2']
 
 export default function SliceNew() {
   const navigate = useNavigate()
-  const [loading, setLoading] = useState(false)
   const [form, setForm] = useState({
     name:      '',
     topology:  'linear',
@@ -24,6 +25,16 @@ export default function SliceNew() {
     vm_count:  2,
     vnc_start: 5901,
     servers:   ['server1', 'server1'],
+  })
+  const mutation = useMutation({
+    mutationFn: createSlice,
+    onSuccess: (data) => {
+      toast.success('Slice encolado correctamente')
+      navigate(`/jobs/${data.job_uid}`)
+    },
+    onError: (err) => {
+      toast.error(err?.response?.data?.detail || 'Error al crear el slice')
+    },
   })
 
   function setField(key, value) {
@@ -52,17 +63,15 @@ export default function SliceNew() {
       return
     }
 
-    setLoading(true)
-    try {
-      // por ahora simula el envío — después conecta al API real
-      await new Promise(r => setTimeout(r, 1500))
-      toast.success('Slice encolado correctamente')
-      navigate('/slices')
-    } catch (e) {
-      toast.error('Error al crear el slice')
-    } finally {
-      setLoading(false)
-    }
+    mutation.mutate({
+      nombre:    form.name,
+      topology:  form.topology,
+      vlan_id:   parseInt(form.vlan_id),
+      cidr:      form.cidr,
+      vm_count:  form.vm_count,
+      servers:   form.servers,
+      vnc_start: form.vnc_start,
+    })
   }
 
   return (
@@ -170,8 +179,8 @@ export default function SliceNew() {
       </Card>
 
       <div className="flex gap-3">
-        <Button onClick={handleSubmit} disabled={loading}>
-          {loading ? 'Desplegando...' : 'Crear Slice'}
+        <Button onClick={handleSubmit} disabled={mutation.isPending}>
+          {mutation.isPending ? 'Desplegando...' : 'Crear Slice'}
         </Button>
         <Button variant="outline" onClick={() => navigate('/slices')}>
           Cancelar

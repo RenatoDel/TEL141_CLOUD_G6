@@ -13,6 +13,8 @@ Ejecutar en server4:
 import sys
 import os
 import logging
+import httpx
+PLACEMENT_URL = "http://localhost:9005"
 
 # Agregar linux_driver al path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'linux_driver'))
@@ -86,15 +88,34 @@ def ejecutar_create_slice(job_uid: str):
         _update_step(job, 2, "done")
         _update_step(job, 3, "running")  # Creando VMs
         db.commit()
+        # Actualizar VMs en MySQL con estado real
+        import time
+        time.sleep(5)  # esperar que QEMU arranque completamente
 
         # Actualizar VMs en MySQL con estado real
         for vm_result in result.vms:
             logger.info(f"[Worker] Actualizando VM vm_id={vm_result.vm_id} status={vm_result.status}")
             vm = db.query(VM).filter(VM.vm_uid == vm_result.vm_id).first()
             if vm:
-                vm.estado = EstadoVMEnum.running if vm_result.status == "running" else EstadoVMEnum.error
+                # si no hubo error en el resultado, la VM está corriendo
+                if vm_result.error:
+                    vm.estado = EstadoVMEnum.error
+                else:
+                    vm.estado = EstadoVMEnum.running
                 logger.info(f"[Worker] VM {vm.vm_uid} actualizada a {vm.estado}")
-            else:    
+
+                # actualizar recursos en placement service
+                if vm.estado == EstadoVMEnum.running:
+                    try:
+                        import httpx
+                        httpx.post(
+                            "http://localhost:9005/placement/update",
+                            json={"server_name": vm.servidor.nombre, "delta": 1},
+                            timeout=5,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[Worker] No se pudo actualizar placement: {e}")
+            else:
                 logger.warning(f"[Worker] VM {vm_result.vm_id} no encontrada en MySQL")
         _update_step(job, 3, "done")
         _update_step(job, 4, "running")  # Verificando estado
@@ -163,6 +184,18 @@ def ejecutar_delete_slice(job_uid: str):
         if success:
             slice_obj.estado = EstadoSliceEnum.deleted
             job.estado       = EstadoJobEnum.completed
+            
+            # liberar recursos en placement service
+            try:
+                import httpx
+                for vm in slice_obj.vms:
+                    httpx.post(
+                        "http://localhost:9005/placement/update",
+                        json={"server_name": vm.servidor.nombre, "delta": -1},
+                        timeout=5,
+                    )
+            except Exception as e:
+                logger.warning(f"[Worker] No se pudo actualizar placement al borrar: {e}")
         else:
             slice_obj.estado = EstadoSliceEnum.error
             job.estado       = EstadoJobEnum.failed
@@ -190,6 +223,23 @@ def _update_step(job: Job, step_index: int, status: str):
             steps[step_index]["status"] = status
             job.progreso = {"steps": steps}
 
+def _call_placement(vm_count: int) -> list:
+    """Llama al Placement Service y retorna lista de servidores."""
+    response = httpx.post(
+        f"{PLACEMENT_URL}/placement/assign",
+        json={"vm_count": vm_count},
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.json()["servers"]
+
+def _update_placement(server_name: str, delta: int):
+    """Actualiza recursos en el Placement Service."""
+    httpx.post(
+        f"{PLACEMENT_URL}/placement/update",
+        json={"server_name": server_name, "delta": delta},
+        timeout=10,
+    )
 
 if __name__ == "__main__":
     conn = redis.from_url(REDIS_URL)

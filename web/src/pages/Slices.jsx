@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -8,55 +9,45 @@ import {
   TableHead, TableHeader, TableRow
 } from '@/components/ui/table'
 import { PlusCircle, Network, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { toast } from 'sonner'
 import TopologyViewer from '@/components/TopologyViewer'
+import { getSlices, deleteSlice } from '@/api/slices'
 
 const STATUS_COLORS = {
   running:  'default',
   creating: 'secondary',
   error:    'destructive',
   deleting: 'secondary',
+  deleted:  'outline',
 }
-
-const mockSlices = [
-  {
-    id:       'slice-linear-001',
-    name:     'slice-linear-001',
-    topology: 'linear',
-    vlan_id:  101,
-    cidr:     '192.168.101.0/24',
-    vm_count: 3,
-    status:   'running',
-    servers:  'server1, server2',
-    vms: [
-      { name: 'slice-linear-001-vm1', server: 'server1', vnc_port: 5901, status: 'running' },
-      { name: 'slice-linear-001-vm2', server: 'server1', vnc_port: 5902, status: 'running' },
-      { name: 'slice-linear-001-vm3', server: 'server2', vnc_port: 5903, status: 'running' },
-    ],
-  },
-  {
-    id:       'slice-ring-001',
-    name:     'slice-ring-001',
-    topology: 'ring',
-    vlan_id:  201,
-    cidr:     '192.168.201.0/24',
-    vm_count: 3,
-    status:   'running',
-    servers:  'server1, server2',
-    vms: [
-      { name: 'slice-ring-001-vm1', server: 'server1', vnc_port: 5911, status: 'running' },
-      { name: 'slice-ring-001-vm2', server: 'server2', vnc_port: 5912, status: 'running' },
-      { name: 'slice-ring-001-vm3', server: 'server1', vnc_port: 5913, status: 'running' },
-    ],
-  },
-]
 
 export default function Slices() {
   const [expanded, setExpanded] = useState(null)
-  const slices = mockSlices
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  const { data: slices = [], isLoading, error } = useQuery({
+    queryKey: ['slices'],
+    queryFn:  getSlices,
+    refetchInterval: 5000,
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (slice_uid) => deleteSlice(slice_uid),
+    onSuccess: (data) => {
+      toast.success('Slice encolado para borrado')
+      queryClient.invalidateQueries(['slices'])
+      navigate(`/jobs/${data.job_uid}`)
+    },
+    onError: () => toast.error('Error al borrar el slice'),
+  })
 
   function toggleExpand(id) {
     setExpanded(prev => prev === id ? null : id)
   }
+
+  if (isLoading) return <div className="text-muted-foreground">Cargando slices...</div>
+  if (error)     return <div className="text-destructive">Error conectando al servidor</div>
 
   return (
     <div className="space-y-6">
@@ -102,44 +93,62 @@ export default function Slices() {
               {slices.map((slice) => (
                 <>
                   <TableRow
-                    key={slice.id}
+                    key={slice.slice_uid}
                     className="cursor-pointer hover:bg-muted/50"
-                    onClick={() => toggleExpand(slice.id)}
+                    onClick={() => toggleExpand(slice.slice_uid)}
                   >
                     <TableCell>
-                      {expanded === slice.id
+                      {expanded === slice.slice_uid
                         ? <ChevronUp size={14} />
                         : <ChevronDown size={14} />
                       }
                     </TableCell>
-                    <TableCell className="font-medium">{slice.name}</TableCell>
+                    <TableCell className="font-medium">{slice.nombre}</TableCell>
                     <TableCell>
-                      <Badge variant="outline">{slice.topology}</Badge>
+                      <Badge variant="outline">{slice.topologia}</Badge>
                     </TableCell>
                     <TableCell>{slice.vlan_id}</TableCell>
                     <TableCell className="font-mono text-sm">{slice.cidr}</TableCell>
-                    <TableCell>{slice.vm_count}</TableCell>
+                    <TableCell>{slice.vms?.length ?? 0}</TableCell>
                     <TableCell>
-                      <Badge variant={STATUS_COLORS[slice.status] ?? 'outline'}>
-                        {slice.status}
+                      <Badge variant={STATUS_COLORS[slice.estado] ?? 'outline'}>
+                        {slice.estado}
                       </Badge>
                     </TableCell>
                     <TableCell onClick={e => e.stopPropagation()}>
-                      <Button variant="ghost" size="icon">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => deleteMutation.mutate(slice.slice_uid)}
+                      >
                         <Trash2 size={16} className="text-destructive" />
                       </Button>
                     </TableCell>
                   </TableRow>
 
-                  {expanded === slice.id && (
-                    <TableRow key={`${slice.id}-detail`}>
+                  {expanded === slice.slice_uid && (
+                    <TableRow key={`${slice.slice_uid}-detail`}>
                       <TableCell colSpan={8} className="bg-muted/20 p-4">
                         <CardHeader className="p-0 pb-3">
                           <CardTitle className="text-sm">
-                            Topología — {slice.topology} · VLAN {slice.vlan_id} · {slice.cidr}
+                            Topología — {slice.topologia} · VLAN {slice.vlan_id} · {slice.cidr}
                           </CardTitle>
                         </CardHeader>
-                        <TopologyViewer slice={slice} />
+                        {slice.vms?.length > 0 ? (
+                          <TopologyViewer slice={{
+                            topology: slice.topologia,
+                            vms: slice.vms.map(vm => ({
+                              name:     vm.nombre,
+                              server:   vm.servidor,
+                              vnc_port: vm.vnc_port,
+                              status:   vm.estado,
+                            }))
+                          }} />
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            Sin VMs desplegadas aún
+                          </p>
+                        )}
                       </TableCell>
                     </TableRow>
                   )}
