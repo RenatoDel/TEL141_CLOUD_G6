@@ -14,6 +14,8 @@ job_queue  = Queue("slice_jobs", connection=redis_conn)
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from vlan_manager import assign_vlan, release_vlan, get_next_vnc_port, cidr_from_vlan
+
 
 from database import get_db
 from models import (
@@ -62,15 +64,10 @@ def create_slice(req: SliceCreateRequest, db: Session = Depends(get_db)):
     if not topologia:
         raise HTTPException(status_code=400, detail=f"Topología '{req.topology}' no existe")
 
-    # Validar VLAN
-    existing = db.query(Slice).filter(Slice.vlan_id == req.vlan_id).first()
-    if existing:
-        raise HTTPException(status_code=409, detail=f"VLAN {req.vlan_id} ya está en uso")
-
     if req.topology == "ring" and req.vm_count < 3:
         raise HTTPException(status_code=400, detail="Topología ring requiere mínimo 3 VMs")
 
-    # VM Placement via servicio externo
+    # VM Placement automático
     try:
         placement_resp = httpx.post(
             f"{PLACEMENT_URL}/placement/assign",
@@ -92,29 +89,42 @@ def create_slice(req: SliceCreateRequest, db: Session = Depends(get_db)):
         nombre         = req.nombre,
         usuario_id     = 1,
         topologia_id   = topologia.id,
-        vlan_id        = req.vlan_id,
-        cidr           = req.cidr,
+        vlan_id        = 0,  # temporal — se asigna abajo
+        cidr           = "",  # temporal
         estado         = EstadoSliceEnum.creating,
-        tiene_internet = req.has_internet,
-        tiene_dhcp     = req.has_dhcp,
+        tiene_internet = any(v.tiene_public for v in req.vms_config) if req.vms_config else False,
+        tiene_dhcp     = False,
     )
     db.add(new_slice)
     db.flush()
 
+    # Asignar VLAN y CIDR automáticamente
+    vlan_id = assign_vlan(db, new_slice.id)
+    cidr    = cidr_from_vlan(vlan_id)
+    new_slice.vlan_id = vlan_id
+    new_slice.cidr    = cidr
+
+    # Asignar VMs con VNC automático
+    vnc_start = get_next_vnc_port(db)
     for i, server_name in enumerate(servers_assigned):
         servidor = db.query(ServidorFisico).filter(
             ServidorFisico.nombre == server_name
         ).first()
+
+        vm_cfg = req.vms_config[i] if req.vms_config and i < len(req.vms_config) else None
         vm = VM(
             vm_uid      = f"{slice_uid}-vm{i+1}",
             nombre      = f"{slice_uid}-vm{i+1}",
             slice_id    = new_slice.id,
             servidor_id = servidor.id,
-            vnc_port    = req.vnc_start + i,
+            vnc_port    = vnc_start + i,
+            ram_mb      = vm_cfg.ram_mb if vm_cfg else 512,
+            vcpus       = 1,
             estado      = "creating",
         )
         db.add(vm)
 
+    # Crear job
     job_uid = f"job-{uuid.uuid4().hex[:8]}"
     job = Job(
         job_uid  = job_uid,
@@ -138,7 +148,7 @@ def create_slice(req: SliceCreateRequest, db: Session = Depends(get_db)):
     from worker import ejecutar_create_slice
     job_queue.enqueue(ejecutar_create_slice, job_uid)
 
-    logger.info(f"Slice {slice_uid} — placement={servers_assigned} — job {job_uid}")
+    logger.info(f"Slice {slice_uid} — VLAN={vlan_id} CIDR={cidr} placement={servers_assigned} — job {job_uid}")
     return {"job_uid": job_uid, "slice_uid": slice_uid}
 
 
@@ -166,6 +176,9 @@ def delete_slice(slice_uid: str, db: Session = Depends(get_db)):
 
     s.estado = EstadoSliceEnum.deleting
 
+    # Liberar VLAN
+    release_vlan(db, s.vlan_id)
+
     job_uid = f"job-{uuid.uuid4().hex[:8]}"
     job = Job(
         job_uid  = job_uid,
@@ -177,11 +190,10 @@ def delete_slice(slice_uid: str, db: Session = Depends(get_db)):
     db.add(job)
     db.commit()
 
-    logger.info(f"Slice {slice_uid} marcado para borrado — job {job_uid} encolado")
-
-    # Encolar en Redis
     from worker import ejecutar_delete_slice
     job_queue.enqueue(ejecutar_delete_slice, job_uid)
+
+    logger.info(f"Slice {slice_uid} marcado para borrado — VLAN {s.vlan_id} liberada — job {job_uid}")
     return {"job_uid": job_uid, "slice_uid": slice_uid}
 
 

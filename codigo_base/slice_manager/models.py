@@ -156,3 +156,11 @@ class Job(Base):
     actualizado_en = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     slice = relationship("Slice", back_populates="jobs")
+
+class VlanPool(Base):
+    __tablename__ = "vlan_pool"
+
+    vlan_id      = Column(Integer, primary_key=True)
+    en_uso       = Column(Boolean, nullable=False, default=False)
+    slice_id     = Column(Integer, ForeignKey("slice.id", ondelete="SET NULL"), nullable=True)
+    reservado_en = Column(DateTime, nullable=True)        

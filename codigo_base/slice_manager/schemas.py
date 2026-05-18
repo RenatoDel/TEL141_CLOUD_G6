@@ -40,17 +40,16 @@ class TokenResponse(BaseModel):
 # Slice
 # ------------------------------------------------------------------
 
+class VMCreateConfig(BaseModel):
+    imagen:      str  = Field(default="cirros", description="cirros o ubuntu")
+    ram_mb:      int  = Field(default=512)
+    tiene_public: bool = False  # SSH público + internet
+    
 class SliceCreateRequest(BaseModel):
-    nombre:       str           = Field(..., example="slice-lab4-001")
-    topology:     TopologiaEnum
-    vlan_id:      int           = Field(..., ge=1, le=4094)
-    cidr:         str           = Field(..., example="192.168.100.0/24")
-    vm_count:     int           = Field(..., ge=2, le=10)
-    vnc_start:    int           = Field(default=5901)
-    has_internet: bool          = False
-    has_dhcp:     bool          = False
-    dhcp_start:   Optional[str] = None
-    dhcp_end:     Optional[str] = None
+    nombre:    str           = Field(..., example="mi-slice")
+    topology:  TopologiaEnum
+    vm_count:  int           = Field(..., ge=2, le=10)
+    vms_config: Optional[List[VMCreateConfig]] = None  # config por VM
 
 class VMResponse(BaseModel):
     vm_uid:   str
