@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
-from models import VlanPool, VM
+from codigo_base.slice_manager.models import VlanPool, VM
 
 logger = logging.getLogger(__name__)
 

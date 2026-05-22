@@ -14,15 +14,15 @@ job_queue  = Queue("slice_jobs", connection=redis_conn)
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from vlan_manager import assign_vlan, release_vlan, get_next_vnc_port, cidr_from_vlan
+from codigo_base.slice_manager.vlan_manager import assign_vlan, release_vlan, get_next_vnc_port, cidr_from_vlan
 
 
-from database import get_db
-from models import (
+from codigo_base.slice_manager.database import get_db
+from codigo_base.slice_manager.models import (
     Slice, VM, Job, Topologia, ServidorFisico,
     EstadoSliceEnum, EstadoJobEnum, TipoJobEnum
 )
-from schemas import (
+from codigo_base.slice_manager.schemas import (
     SliceCreateRequest, SliceResponse, VMResponse,
     JobResponse, LoginRequest, TokenResponse
 )
@@ -145,7 +145,7 @@ def create_slice(req: SliceCreateRequest, db: Session = Depends(get_db)):
     db.add(job)
     db.commit()
 
-    from worker import ejecutar_create_slice
+    from codigo_base.slice_manager.worker import ejecutar_create_slice
     job_queue.enqueue(ejecutar_create_slice, job_uid)
 
     logger.info(f"Slice {slice_uid} — VLAN={vlan_id} CIDR={cidr} placement={servers_assigned} — job {job_uid}")
@@ -190,7 +190,7 @@ def delete_slice(slice_uid: str, db: Session = Depends(get_db)):
     db.add(job)
     db.commit()
 
-    from worker import ejecutar_delete_slice
+    from codigo_base.slice_manager.worker import ejecutar_delete_slice
     job_queue.enqueue(ejecutar_delete_slice, job_uid)
 
     logger.info(f"Slice {slice_uid} marcado para borrado — VLAN {s.vlan_id} liberada — job {job_uid}")

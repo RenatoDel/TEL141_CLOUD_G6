@@ -22,8 +22,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'linux_driver')
 import redis
 from rq import Worker, Queue
 
-from database import SessionLocal
-from models import Job, Slice, VM, EstadoJobEnum, EstadoSliceEnum, EstadoVMEnum
+from codigo_base.slice_manager.database import SessionLocal
+from codigo_base.slice_manager.models import Job, Slice, VM, EstadoJobEnum, EstadoSliceEnum, EstadoVMEnum
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)

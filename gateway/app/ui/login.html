@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Login · PUCP Private Cloud</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo">☁</div>
+    <h1>PUCP Private Cloud</h1>
+    <p>Ingresa al panel de orquestación</p>
+
+    <div class="form-grid">
+      <div class="field full">
+        <label>Usuario</label>
+        <input id="username" value="admin" autocomplete="username">
+      </div>
+      <div class="field full">
+        <label>Password</label>
+        <input id="password" type="password" value="admin123" autocomplete="current-password">
+      </div>
+    </div>
+
+    <div class="toolbar" style="margin-top:16px">
+      <button class="btn-primary" onclick="login()">Ingresar</button>
+    </div>
+
+    <div style="margin-top:18px">
+      <pre id="output">Esperando login...</pre>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script>
+    if (CloudUI.getToken()) {
+      window.location.href = "/dashboard.html";
+    }
+
+    async function login() {
+      try {
+        const payload = {
+          username: document.getElementById("username").value.trim(),
+          password: document.getElementById("password").value
+        };
+
+        const data = await CloudUI.api("/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        CloudUI.saveSession(data);
+        CloudUI.showResponse("output", data);
+        setTimeout(() => window.location.href = "/dashboard.html", 400);
+      } catch (err) {
+        CloudUI.showResponse("output", { error: String(err) });
+      }
+    }
+  </script>
+</body>
+</html>

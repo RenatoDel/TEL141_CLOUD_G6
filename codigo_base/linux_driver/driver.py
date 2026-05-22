@@ -19,10 +19,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ssh_client     import SSHClient, get_client, get_client_internal
-from vm_manager     import VMManager, VMConfig
-from network_manager import NetworkManager
-from topologies      import (
+from codigo_base.linux_driver.ssh_client     import SSHClient, get_client, get_client_internal
+from codigo_base.linux_driver.vm_manager     import VMManager, VMConfig
+from codigo_base.linux_driver.network_manager import NetworkManager
+from codigo_base.linux_driver.topologies      import (
     build_linear_slice, get_linear_summary,
     build_ring_slice,   get_ring_summary,
     SUPPORTED,

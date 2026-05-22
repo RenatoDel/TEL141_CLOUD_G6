@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Imágenes · PUCP Private Cloud</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-badge">☁</div>
+        <div>
+          <h2>PUCP Cloud</h2>
+          <p>Módulos separados</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="/dashboard.html" data-nav="dashboard">Dashboard</a>
+        <a href="/images.html" data-nav="images">Imágenes</a>
+        <a href="/slices.html" data-nav="slices">Slices legacy</a>
+        <a href="/graph-slices.html" data-nav="graph">Graph slices</a>
+        <a href="/monitoring.html" data-nav="monitoring">Monitoreo</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="user-pill">Sesión: <strong data-user-name>admin</strong></div>
+        <button class="btn-danger logout-btn" data-logout>Cerrar sesión</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h1 class="page-title">Imágenes</h1>
+          <p class="page-subtitle">Subida real, importación por URL y catálogo</p>
+        </div>
+        <div class="chips">
+          <span class="chip ok">image_service</span>
+          <span class="chip" id="countChip">0 imágenes</span>
+        </div>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Subir archivo</h2>
+            <p class="card-subtitle">Carga una imagen real al catálogo</p>
+          </div>
+          <div class="card-body">
+            <div class="form-grid">
+              <div class="field">
+                <label>Nombre lógico</label>
+                <input id="upload_name" value="ubuntu-20.04-server-cloudimg-amd64.img">
+              </div>
+              <div class="field">
+                <label>OS type</label>
+                <select id="upload_os_type">
+                  <option value="ubuntu" selected>ubuntu</option>
+                  <option value="cirros">cirros</option>
+                  <option value="linux">linux</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Formato</label>
+                <select id="upload_format">
+                  <option value="qcow2" selected>qcow2</option>
+                  <option value="img">img</option>
+                  <option value="raw">raw</option>
+                  <option value="iso">iso</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Archivo</label>
+                <input id="upload_file" type="file" accept=".img,.qcow2,.iso,.raw">
+              </div>
+            </div>
+
+            <div class="toolbar" style="margin-top:16px">
+              <button class="btn-primary" onclick="uploadImage()">Subir imagen</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Importar por URL</h2>
+            <p class="card-subtitle">Descarga directa desde internet</p>
+          </div>
+          <div class="card-body">
+            <div class="form-grid">
+              <div class="field">
+                <label>Nombre lógico</label>
+                <input id="url_name" value="ubuntu-focal-from-url.img">
+              </div>
+              <div class="field">
+                <label>OS type</label>
+                <select id="url_os_type">
+                  <option value="ubuntu" selected>ubuntu</option>
+                  <option value="cirros">cirros</option>
+                  <option value="linux">linux</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Formato</label>
+                <select id="url_format">
+                  <option value="qcow2" selected>qcow2</option>
+                  <option value="img">img</option>
+                  <option value="raw">raw</option>
+                  <option value="iso">iso</option>
+                </select>
+              </div>
+              <div class="field full">
+                <label>URL</label>
+                <input id="url_value" placeholder="https://.../ubuntu-20.04-server-cloudimg-amd64.img">
+              </div>
+            </div>
+
+            <div class="toolbar" style="margin-top:16px">
+              <button class="btn-secondary" onclick="importFromUrl()">Importar URL</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <div class="card-header">
+          <h2 class="card-title">Respuesta</h2>
+          <p class="card-subtitle">Resultado del backend</p>
+        </div>
+        <div class="card-body">
+          <pre id="output">Esperando acción...</pre>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <div class="card-header">
+          <h2 class="card-title">Catálogo actual</h2>
+          <p class="card-subtitle">Imágenes disponibles</p>
+        </div>
+        <div class="card-body">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Filename</th>
+                  <th>OS</th>
+                  <th>Formato</th>
+                  <th>Tamaño GB</th>
+                  <th>Origen</th>
+                  <th>SHA256</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody id="imagesBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script>
+    CloudUI.requireAuth();
+    CloudUI.setupLayout("images");
+
+    function setCount(n) {
+      const chip = document.getElementById("countChip");
+      chip.textContent = `${n} imágenes`;
+    }
+
+    async function loadImages() {
+      try {
+        const data = await CloudUI.api("/api/images");
+        const body = document.getElementById("imagesBody");
+        setCount(data.length);
+
+        body.innerHTML = data.map(img => `
+          <tr>
+            <td>${CloudUI.escapeHtml(img.name)}</td>
+            <td>${CloudUI.escapeHtml(img.filename)}</td>
+            <td>${CloudUI.escapeHtml(img.os_type)}</td>
+            <td>${CloudUI.escapeHtml(img.format)}</td>
+            <td>${CloudUI.escapeHtml(String(img.size_gb))}</td>
+            <td>${CloudUI.escapeHtml(img.source || "-")}</td>
+            <td style="max-width:180px;word-break:break-all">${CloudUI.escapeHtml(img.sha256 || "-")}</td>
+            <td>
+              <div class="toolbar">
+                <button class="btn-secondary btn-small" onclick="downloadImage('${img.stored_filename || img.filename}')">Descargar</button>
+                <button class="btn-danger btn-small" onclick="deleteImage('${img.name}')">Eliminar</button>
+              </div>
+            </td>
+          </tr>
+        `).join("");
+
+        CloudUI.showResponse("output", data);
+      } catch (err) {
+        CloudUI.showResponse("output", { error: String(err) });
+      }
+    }
+
+    async function uploadImage() {
+      try {
+        const fileInput = document.getElementById("upload_file");
+        if (!fileInput.files.length) throw new Error("Selecciona un archivo");
+
+        const fd = new FormData();
+        fd.append("name", document.getElementById("upload_name").value.trim());
+        fd.append("os_type", document.getElementById("upload_os_type").value);
+        fd.append("format", document.getElementById("upload_format").value);
+        fd.append("file", fileInput.files[0]);
+
+        const res = await fetch("/api/images/upload", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${CloudUI.getToken()}`
+          },
+          body: fd
+        });
+
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
+        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+
+        CloudUI.showResponse("output", data);
+        fileInput.value = "";
+        await loadImages();
+      } catch (err) {
+        CloudUI.showResponse("output", { error: String(err) });
+      }
+    }
+
+    async function importFromUrl() {
+      try {
+        const fd = new FormData();
+        fd.append("name", document.getElementById("url_name").value.trim());
+        fd.append("url", document.getElementById("url_value").value.trim());
+        fd.append("os_type", document.getElementById("url_os_type").value);
+        fd.append("format", document.getElementById("url_format").value);
+
+        const res = await fetch("/api/images/import-url", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${CloudUI.getToken()}`
+          },
+          body: fd
+        });
+
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
+        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+
+        CloudUI.showResponse("output", data);
+        await loadImages();
+      } catch (err) {
+        CloudUI.showResponse("output", { error: String(err) });
+      }
+    }
+
+    function downloadImage(storedFilename) {
+      window.open(`/api/images/download/${encodeURIComponent(storedFilename)}`, "_blank");
+    }
+
+    async function deleteImage(name) {
+      try {
+        if (!confirm(`¿Eliminar imagen ${name}?`)) return;
+        const data = await CloudUI.api(`/api/images/${encodeURIComponent(name)}`, {
+          method: "DELETE"
+        });
+        CloudUI.showResponse("output", data);
+        await loadImages();
+      } catch (err) {
+        CloudUI.showResponse("output", { error: String(err) });
+      }
+    }
+
+    loadImages();
+  </script>
+
+
+
+
+<!-- IMAGE_UPLOAD_AUTONAME_V5 -->
+<script>
+(() => {
+  if (window.__imageAutoNameV5Installed) return;
+  window.__imageAutoNameV5Installed = true;
+
+  function normalize(v) {
+    return (v || "").trim().toLowerCase();
+  }
+
+  function splitFileName(filename) {
+    const just = (filename || "").split(/[\\/]/).pop() || "";
+    const m = just.match(/^(.*?)(\.[^.]+)?$/);
+    return {
+      full: just.trim(),
+      stem: (m?.[1] || "").trim(),
+      ext: (m?.[2] || "").trim()
+    };
+  }
+
+  function joinName(stem, ext, n = null) {
+    if (!stem) return "";
+    return n == null ? `${stem}${ext}` : `${stem} (${n})${ext}`;
+  }
+
+  function findCardByTitle(titleRegex) {
+    const cards = [...document.querySelectorAll("section, .card, .panel, .widget, div")];
+    return cards.find(el => titleRegex.test((el.textContent || "").trim()));
+  }
+
+  function findFieldInputByLabel(card, labelRegex) {
+    if (!card) return null;
+
+    const labels = [...card.querySelectorAll("label")];
+    for (const label of labels) {
+      if (!labelRegex.test((label.textContent || "").trim())) continue;
+
+      const field = label.closest(".field, .form-group, .input-group, div") || label.parentElement;
+      if (!field) continue;
+
+      const candidate = field.querySelector("input, select, textarea");
+      if (candidate) return candidate;
+    }
+    return null;
+  }
+
+  async function getCatalog() {
+    try {
+      if (window.CloudUI && typeof window.CloudUI.api === "function") {
+        return await window.CloudUI.api("/api/images");
+      }
+    } catch (_) {}
+
+    const headers = {};
+    const token =
+      localStorage.getItem("token") ||
+      localStorage.getItem("access_token") ||
+      sessionStorage.getItem("token") ||
+      sessionStorage.getItem("access_token");
+
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    const r = await fetch("/api/images", { headers });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  }
+
+  async function nextAvailableNameFromFile(filename) {
+    const { stem, ext } = splitFileName(filename);
+    const base = joinName(stem, ext);
+    if (!base) return "";
+
+    try {
+      const items = await getCatalog();
+      const used = new Set(
+        (Array.isArray(items) ? items : [])
+          .flatMap(x => [x.name, x.filename, x.stored_filename])
+          .map(normalize)
+          .filter(Boolean)
+      );
+
+      if (!used.has(normalize(base))) return base;
+
+      let i = 1;
+      while (used.has(normalize(joinName(stem, ext, i)))) i += 1;
+      return joinName(stem, ext, i);
+    } catch (_) {
+      return base;
+    }
+  }
+
+  function applyName(input, value) {
+    if (!input) return;
+    input.value = value;
+    input.setAttribute("value", value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function inferOs(filename) {
+    const f = normalize(filename);
+    if (f.includes("cirros")) return "cirros";
+    if (f.includes("ubuntu")) return "ubuntu";
+    if (f.includes("debian")) return "debian";
+    return "linux";
+  }
+
+  function inferFormat(filename) {
+    const f = normalize(filename);
+    if (f.endsWith(".qcow2")) return "qcow2";
+    if (f.endsWith(".img")) return "qcow2";
+    if (f.endsWith(".iso")) return "iso";
+    if (f.endsWith(".raw")) return "raw";
+    return "";
+  }
+
+  function bindUploadCard() {
+    const card = findCardByTitle(/subir archivo/i);
+    if (!card) return;
+
+    const nameInput = findFieldInputByLabel(card, /nombre lógico/i);
+    const fileInput = findFieldInputByLabel(card, /^archivo$/i) || card.querySelector('input[type="file"]');
+    const osSelect = findFieldInputByLabel(card, /os type/i);
+    const formatSelect = findFieldInputByLabel(card, /formato/i);
+
+    if (!fileInput || !nameInput) return;
+    if (fileInput.dataset.autonameBound === "1") return;
+    fileInput.dataset.autonameBound = "1";
+
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+
+      const finalName = await nextAvailableNameFromFile(file.name);
+
+      applyName(nameInput, finalName);
+
+      setTimeout(() => applyName(nameInput, finalName), 50);
+      setTimeout(() => applyName(nameInput, finalName), 250);
+      setTimeout(() => applyName(nameInput, finalName), 800);
+
+      const os = inferOs(file.name);
+      if (osSelect && [...osSelect.options].some(o => o.value === os)) {
+        osSelect.value = os;
+        osSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+
+      const fmt = inferFormat(file.name);
+      if (formatSelect && fmt && [...formatSelect.options].some(o => o.value === fmt)) {
+        formatSelect.value = fmt;
+        formatSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+  }
+
+  function bindImportCard() {
+    const card = findCardByTitle(/importar por url/i);
+    if (!card) return;
+
+    const nameInput = findFieldInputByLabel(card, /nombre lógico/i);
+    const urlInput = findFieldInputByLabel(card, /^url$/i) || card.querySelector('input[type="url"]');
+
+    if (!urlInput || !nameInput) return;
+    if (urlInput.dataset.autourlBound === "1") return;
+    urlInput.dataset.autourlBound = "1";
+
+    urlInput.addEventListener("blur", async () => {
+      try {
+        const u = new URL((urlInput.value || "").trim());
+        const fileName = (u.pathname.split("/").pop() || "").trim();
+        if (!fileName) return;
+
+        const finalName = await nextAvailableNameFromFile(fileName);
+        applyName(nameInput, finalName);
+      } catch (_) {}
+    });
+  }
+
+  function boot() {
+    bindUploadCard();
+    bindImportCard();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+
+  const mo = new MutationObserver(() => boot());
+  mo.observe(document.documentElement, { childList: true, subtree: true });
+})();
+</script>
+
+</body>
+</html>

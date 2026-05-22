@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Slices legacy · PUCP Private Cloud</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-badge">☁</div>
+        <div>
+          <h2>PUCP Cloud</h2>
+          <p>Módulo legacy</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="/dashboard.html" data-nav="dashboard">Dashboard</a>
+        <a href="/images.html" data-nav="images">Imágenes</a>
+        <a href="/slices.html" data-nav="slices">Slices legacy</a>
+        <a href="/graph-slices.html" data-nav="graph">Graph slices</a>
+        <a href="/monitoring.html" data-nav="monitoring">Monitoreo</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="user-pill">Sesión: <strong data-user-name>admin</strong></div>
+        <button class="btn-danger logout-btn" data-logout>Cerrar sesión</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h1 class="page-title">Slices legacy</h1>
+          <p class="page-subtitle">Topologías lineal y anillo</p>
+        </div>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Crear slice</h2>
+            <p class="card-subtitle">Modo clásico para pruebas rápidas</p>
+          </div>
+          <div class="card-body">
+            <div class="form-grid">
+              <div class="field">
+                <label>Nombre</label>
+                <input id="slice_name" value="legacy-ui-01">
+              </div>
+              <div class="field">
+                <label>Topología</label>
+                <select id="topology">
+                  <option value="linear" selected>linear</option>
+                  <option value="ring">ring</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>VLAN ID</label>
+                <input id="vlan_id" type="number" value="120">
+              </div>
+              <div class="field">
+                <label>CIDR</label>
+                <input id="cidr" value="192.168.120.0/24">
+              </div>
+              <div class="field">
+                <label>Cantidad de VMs</label>
+                <input id="vm_count" type="number" min="2" value="2">
+              </div>
+              <div class="field">
+                <label>Imagen</label>
+                <select id="image_name">
+                  <option value="cirros-base.img" selected>cirros-base.img</option>
+                  <option value="ubuntu-20.04-server-cloudimg-amd64.img">ubuntu-20.04-server-cloudimg-amd64.img</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="toolbar" style="margin-top:16px">
+              <button class="btn-primary" onclick="createSlice()">Crear</button>
+              <button class="btn-secondary" onclick="loadSlices()">Refrescar</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Respuesta</h2>
+            <p class="card-subtitle">Último resultado</p>
+          </div>
+          <div class="card-body">
+            <pre id="output">Esperando acción...</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <div class="card-header">
+          <h2 class="card-title">Slices existentes</h2>
+        </div>
+        <div class="card-body">
+          <div id="sliceList" class="slice-list"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script>
+    CloudUI.requireAuth();
+    CloudUI.setupLayout("slices");
+
+    async function loadSlices() {
+      try {
+        const data = await CloudUI.api("/api/slices");
+        const container = document.getElementById("sliceList");
+
+        if (!data.length) {
+          container.innerHTML = `<div class="empty" style="grid-column:1/-1">No hay slices legacy.</div>`;
+          CloudUI.showResponse("output", data);
+          return;
+        }
+
+        container.innerHTML = data.map(slice => `
+          <div class="slice-card">
+            <h3>${CloudUI.escapeHtml(slice.slice_name)}</h3>
+            <div class="slice-meta">
+              topology=${CloudUI.escapeHtml(slice.topology)} · vlan=${CloudUI.escapeHtml(String(slice.vlan_id))} · vm_count=${CloudUI.escapeHtml(String(slice.vm_count))}
+            </div>
+            ${(slice.vms || []).map(vm => `
+              <div class="vm-box">
+                <strong>${CloudUI.escapeHtml(vm.name)}</strong>
+                worker=${CloudUI.escapeHtml(vm.server)} · vnc=${CloudUI.escapeHtml(String(vm.vnc_port))} · status=${CloudUI.escapeHtml(vm.status)}
+              </div>
+            `).join("")}
+            <div class="toolbar" style="margin-top:12px">
+              <button class="btn-danger btn-small" onclick="deleteSlice('${slice.slice_name}')">Eliminar</button>
+            </div>
+          </div>
+        `).join("");
+
+        CloudUI.showResponse("output", data);
+      } catch (err) {
+        CloudUI.showResponse("output", { error: String(err) });
+      }
+    }
+
+    async function createSlice() {
+      try {
+        const payload = {
+          slice_name: document.getElementById("slice_name").value.trim(),
+          topology: document.getElementById("topology").value,
+          vlan_id: Number(document.getElementById("vlan_id").value),
+          cidr: document.getElementById("cidr").value.trim(),
+          vm_count: Number(document.getElementById("vm_count").value),
+          has_internet: false,
+          has_dhcp: false,
+          image_name: document.getElementById("image_name").value
+        };
+
+        const data = await CloudUI.api("/api/slices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        CloudUI.showResponse("output", data);
+        await loadSlices();
+      } catch (err) {
+        CloudUI.showResponse("output", { error: String(err) });
+      }
+    }
+
+    async function deleteSlice(name) {
+      try {
+        if (!confirm(`¿Eliminar slice ${name}?`)) return;
+        const data = await CloudUI.api(`/api/slices/${encodeURIComponent(name)}`, {
+          method: "DELETE"
+        });
+        CloudUI.showResponse("output", data);
+        await loadSlices();
+      } catch (err) {
+        CloudUI.showResponse("output", { error: String(err) });
+      }
+    }
+
+    loadSlices();
+  </script>
+</body>
+</html>

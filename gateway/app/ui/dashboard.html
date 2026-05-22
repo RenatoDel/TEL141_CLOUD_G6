@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard · PUCP Private Cloud</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-badge">☁</div>
+        <div>
+          <h2>PUCP Cloud</h2>
+          <p>Panel modular</p>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <a href="/dashboard.html" data-nav="dashboard">Dashboard</a>
+        <a href="/images.html" data-nav="images">Imágenes</a>
+        <a href="/slices.html" data-nav="slices">Slices legacy</a>
+        <a href="/graph-slices.html" data-nav="graph">Graph slices</a>
+        <a href="/monitoring.html" data-nav="monitoring">Monitoreo</a>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="user-pill">Sesión: <strong data-user-name>admin</strong></div>
+        <button class="btn-danger logout-btn" data-logout>Cerrar sesión</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h1 class="page-title">Dashboard</h1>
+          <p class="page-subtitle">Accesos rápidos a cada módulo</p>
+        </div>
+        <div class="chips">
+          <span class="chip ok">Frontend modular</span>
+          <span class="chip">Usuario: <span data-user-name>admin</span></span>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <h3>Imágenes</h3>
+          <strong id="statImages">-</strong>
+        </div>
+        <div class="stat">
+          <h3>Slices legacy</h3>
+          <strong id="statSlices">-</strong>
+        </div>
+        <div class="stat">
+          <h3>Graph slices</h3>
+          <strong id="statGraph">-</strong>
+        </div>
+        <div class="stat">
+          <h3>Estado</h3>
+          <strong>OK</strong>
+        </div>
+      </div>
+
+      <div class="grid grid-3" style="margin-top:20px">
+        <a class="card" href="/images.html">
+          <div class="card-header">
+            <h2 class="card-title">Imágenes</h2>
+            <p class="card-subtitle">Registrar y listar imágenes base</p>
+          </div>
+          <div class="card-body">
+            Catálogo de imágenes disponibles para los despliegues.
+          </div>
+        </a>
+
+        <a class="card" href="/slices.html">
+          <div class="card-header">
+            <h2 class="card-title">Slices legacy</h2>
+            <p class="card-subtitle">Modo lineal y anillo</p>
+          </div>
+          <div class="card-body">
+            Flujo simple para pruebas rápidas con topologías clásicas.
+          </div>
+        </a>
+
+        <a class="card" href="/graph-slices.html">
+          <div class="card-header">
+            <h2 class="card-title">Graph slices</h2>
+            <p class="card-subtitle">Topologías arbitrarias</p>
+          </div>
+          <div class="card-body">
+            Nodos, enlaces, workers preferidos e Internet por nodo.
+          </div>
+        </a>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <div class="card-header">
+          <h2 class="card-title">Respuesta</h2>
+          <p class="card-subtitle">Resumen de carga del dashboard</p>
+        </div>
+        <div class="card-body">
+          <pre id="output">Cargando métricas...</pre>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script>
+    CloudUI.requireAuth();
+    CloudUI.setupLayout("dashboard");
+
+    async function loadDashboard() {
+      try {
+        const [images, slices, graph] = await Promise.all([
+          CloudUI.api("/api/images"),
+          CloudUI.api("/api/slices"),
+          CloudUI.api("/api/graph-slices")
+        ]);
+
+        CloudUI.stat("statImages", images.length);
+        CloudUI.stat("statSlices", slices.length);
+        CloudUI.stat("statGraph", graph.length);
+
+        CloudUI.showResponse("output", {
+          images: images.length,
+          legacy_slices: slices.length,
+          graph_slices: graph.length
+        });
+      } catch (err) {
+        CloudUI.showResponse("output", { error: String(err) });
+      }
+    }
+
+    loadDashboard();
+  </script>
+</body>
+</html>

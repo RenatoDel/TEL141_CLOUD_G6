@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Monitoreo · PUCP Private Cloud</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css">
+  <style>
+    .summary-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;margin-top:20px}
+    .summary-card,.monitor-card,.worker-card,.slice-card{background:#101936;border:1px solid rgba(255,255,255,.06);border-radius:18px;padding:16px}
+    .summary-card h4,.worker-card h4{margin:0 0 8px;font-size:12px;color:var(--muted);text-transform:uppercase}
+    .summary-card strong{font-size:24px}
+    .layout{display:grid;grid-template-columns:1.2fr .8fr;gap:18px;margin-top:18px}
+    .workers-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:14px}
+    .metric{display:flex;justify-content:space-between;margin:8px 0;font-size:13px}
+    .bar{height:8px;border-radius:999px;background:#1a274e;overflow:hidden;margin-top:6px}
+    .bar > span{display:block;height:100%;background:linear-gradient(90deg,#6ea8ff,#58d1c9)}
+    .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+    .chip2{display:inline-flex;padding:6px 10px;border-radius:999px;background:#18264b;border:1px solid rgba(255,255,255,.08);font-size:12px}
+    .ok{color:#8ff0b5}
+    .bad{color:#ff8d9a}
+    .worker-card h3{margin:0 0 6px}
+    .section-title{margin:0 0 6px}
+    .section-sub{margin:0 0 14px;color:var(--muted);font-size:13px}
+    .links{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+    .links a{text-decoration:none}
+    @media (max-width:1100px){
+      .summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .layout{grid-template-columns:1fr}
+      .workers-grid{grid-template-columns:1fr}
+    }
+    @media (max-width:700px){
+      .summary-grid{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-badge">☁</div>
+        <div>
+          <h2>PUCP Cloud</h2>
+          <p>Observabilidad</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="/dashboard.html" data-nav="dashboard">Dashboard</a>
+        <a href="/images.html" data-nav="images">Imágenes</a>
+        <a href="/slices.html" data-nav="slices">Slices legacy</a>
+        <a href="/graph-slices.html" data-nav="graph">Graph slices</a>
+        <a href="/monitoring.html" data-nav="monitoring">Monitoreo</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="user-pill">Sesión: <strong data-user-name>admin</strong></div>
+        <button class="btn-danger logout-btn" data-logout>Cerrar sesión</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h1 class="page-title">Monitoreo</h1>
+          <p class="page-subtitle">Recursos disponibles de workers y VMs desplegadas por worker</p>
+        </div>
+        <div class="chips">
+          <span class="chip" id="lastUpdateChip">sin actualización</span>
+        </div>
+      </div>
+
+      <div id="summaryGrid" class="summary-grid"></div>
+
+      <div class="layout">
+        <section class="monitor-card">
+          <h2 class="section-title">Workers Linux</h2>
+          <p class="section-sub">CPU, RAM y disco por worker usando Prometheus.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn-primary btn-small" onclick="refreshAll()">Refrescar</button>
+          </div>
+          <div id="workersGrid" class="workers-grid"></div>
+        </section>
+
+        <section class="monitor-card">
+          <h2 class="section-title">VMs por worker</h2>
+          <p class="section-sub">Inventario desde graph slices, no desde iframe de Grafana.</p>
+          <div id="vmByWorker"></div>
+          <div class="links">
+            <a class="btn-secondary btn-small" href="http://127.0.0.1:3000" target="_blank" rel="noopener">Abrir Grafana</a>
+            <a class="btn-secondary btn-small" href="http://127.0.0.1:9090" target="_blank" rel="noopener">Abrir Prometheus</a>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script>
+    CloudUI.requireAuth();
+    CloudUI.setupLayout("monitoring");
+
+    function setLastUpdate() {
+      const d = new Date();
+      document.getElementById("lastUpdateChip").textContent =
+        "actualizado: " + d.toLocaleTimeString();
+    }
+
+    function pct(n, total) {
+      if (!total || total <= 0) return 0;
+      return Math.max(0, Math.min(100, (n / total) * 100));
+    }
+
+    function gb(n) {
+      return Number(n || 0).toFixed(2).replace(/\.00$/, "");
+    }
+
+    function renderSummary(data, slices) {
+      const t = data?.totals || {};
+      const html = `
+        <div class="summary-card">
+          <h4>Workers arriba</h4>
+          <strong>${t.workers_up || 0}/${t.workers_total || 0}</strong>
+        </div>
+        <div class="summary-card">
+          <h4>CPU promedio</h4>
+          <strong>${gb(t.avg_cpu_percent || 0)}%</strong>
+        </div>
+        <div class="summary-card">
+          <h4>RAM usada</h4>
+          <strong>${gb(t.mem_used_gb || 0)} GB</strong>
+          <div>${gb(t.mem_total_gb || 0)} GB totales</div>
+        </div>
+        <div class="summary-card">
+          <h4>Disco usado</h4>
+          <strong>${gb(t.disk_used_gb || 0)} GB</strong>
+          <div>${gb(t.disk_total_gb || 0)} GB totales</div>
+        </div>
+        <div class="summary-card">
+          <h4>Slices graph</h4>
+          <strong>${(slices || []).length}</strong>
+        </div>
+      `;
+      document.getElementById("summaryGrid").innerHTML = html;
+    }
+
+    function renderWorkers(data) {
+      const workers = data?.workers || [];
+      document.getElementById("workersGrid").innerHTML = workers.map(w => {
+        const memPct = pct(w.mem_used_gb, w.mem_total_gb);
+        const diskPct = pct(w.disk_used_gb, w.disk_total_gb);
+        const stateCls = w.status === "up" ? "ok" : "bad";
+        return `
+          <div class="worker-card">
+            <h4>${CloudUI.escapeHtml(w.worker)}</h4>
+            <h3 class="${stateCls}">${CloudUI.escapeHtml(w.status)}</h3>
+
+            <div class="metric"><span>CPU</span><strong>${gb(w.cpu_percent)}%</strong></div>
+            <div class="bar"><span style="width:${gb(w.cpu_percent)}%"></span></div>
+
+            <div class="metric"><span>RAM</span><strong>${gb(w.mem_used_gb)} / ${gb(w.mem_total_gb)} GB</strong></div>
+            <div class="bar"><span style="width:${memPct}%"></span></div>
+
+            <div class="metric"><span>Disco</span><strong>${gb(w.disk_used_gb)} / ${gb(w.disk_total_gb)} GB</strong></div>
+            <div class="bar"><span style="width:${diskPct}%"></span></div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function extractVmsByWorker(slices) {
+      const out = {};
+      for (const slice of (slices || [])) {
+        const arr = slice.vms || slice.nodes || [];
+        for (const vm of arr) {
+          const worker = vm.worker || vm.worker_name || vm.preferred_worker || "sin-worker";
+          const name = vm.name || vm.vm_name || vm.id || "vm";
+          if (!out[worker]) out[worker] = [];
+          out[worker].push({
+            name,
+            slice: slice.slice_name || slice.name || "-",
+            status: vm.status || "running"
+          });
+        }
+      }
+      return out;
+    }
+
+    function renderVmByWorker(slices) {
+      const grouped = extractVmsByWorker(slices);
+      const workers = Object.keys(grouped).sort();
+      if (!workers.length) {
+        document.getElementById("vmByWorker").innerHTML =
+          `<div class="slice-card">No hay VMs activas en graph slices.</div>`;
+        return;
+      }
+
+      document.getElementById("vmByWorker").innerHTML = workers.map(worker => {
+        const chips = grouped[worker].map(vm => `
+          <span class="chip2">${CloudUI.escapeHtml(vm.name)} · ${CloudUI.escapeHtml(vm.slice)}</span>
+        `).join("");
+        return `
+          <div class="slice-card" style="margin-bottom:12px">
+            <h3 style="margin:0 0 8px">${CloudUI.escapeHtml(worker)}</h3>
+            <div class="chips">${chips}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    async function refreshAll() {
+      try {
+        const [summary, slices] = await Promise.all([
+          CloudUI.api("/api/monitoring/summary"),
+          CloudUI.api("/api/graph-slices")
+        ]);
+        renderSummary(summary, slices);
+        renderWorkers(summary);
+        renderVmByWorker(slices);
+        setLastUpdate();
+      } catch (err) {
+        document.getElementById("workersGrid").innerHTML =
+          `<div class="worker-card">Error cargando métricas: ${CloudUI.escapeHtml(String(err))}</div>`;
+      }
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 15000);
+  </script>
+</body>
+</html>

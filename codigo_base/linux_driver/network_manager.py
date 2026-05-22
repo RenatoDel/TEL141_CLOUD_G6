@@ -20,7 +20,7 @@ y actúa como gateway para las VMs.
 import logging
 from typing import Optional
 
-from ssh_client import SSHClient
+from codigo_base.linux_driver.ssh_client import SSHClient
 
 logger = logging.getLogger(__name__)
 

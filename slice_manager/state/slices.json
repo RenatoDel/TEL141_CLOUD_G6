@@ -1,0 +1,132 @@
+[
+  {
+    "mode": "graph",
+    "slice_name": "test-ssh",
+    "network_backend": "vlan",
+    "internet_mode": "headnode_nat",
+    "vlan_base": 300,
+    "workers": [
+      "server1",
+      "server2"
+    ],
+    "vms": [
+      {
+        "vm_id": "vm1",
+        "name": "vm1",
+        "server": "server1",
+        "vnc_port": 6010,
+        "status": "running",
+        "error": null,
+        "interfaces": [
+          {
+            "link_id": "l1",
+            "peer": "vm2",
+            "vlan_id": 300,
+            "tap_name": "tp0-vm1",
+            "mac_address": "02:26:a9:d1:c2:08",
+            "ip_cidr": "10.200.0.1/30",
+            "static_routes": [
+              {
+                "to": "10.254.50.2/32",
+                "via": "10.200.0.2"
+              }
+            ]
+          },
+          {
+            "link_id": "nat",
+            "peer": "headnode_nat",
+            "vlan_id": 302,
+            "tap_name": "nt-vm1",
+            "mac_address": "02:e4:31:34:e6:8a",
+            "ip_cidr": "172.31.52.10/24",
+            "gateway4": "172.31.52.1",
+            "nameservers": [
+              "8.8.8.8",
+              "1.1.1.1"
+            ]
+          }
+        ],
+        "loopback_cidr": "10.254.50.1/32",
+        "image_name": "focal-server-cloudimg-amd64.img",
+        "vcpus": 1,
+        "ram_mb": 512,
+        "disk_gb": 10,
+        "internet": true,
+        "preferred_worker": null,
+        "stored_filename": "focal-server-cloudimg-amd64.img",
+        "image_sync": {
+          "headnode": "cached",
+          "worker": "cached"
+        }
+      },
+      {
+        "vm_id": "vm2",
+        "name": "vm2",
+        "server": "server2",
+        "vnc_port": 6011,
+        "status": "running",
+        "error": null,
+        "interfaces": [
+          {
+            "link_id": "l1",
+            "peer": "vm1",
+            "vlan_id": 300,
+            "tap_name": "tp0-vm2",
+            "mac_address": "02:5c:3a:cc:b7:ab",
+            "ip_cidr": "10.200.0.2/30",
+            "static_routes": [
+              {
+                "to": "10.254.50.1/32",
+                "via": "10.200.0.1"
+              },
+              {
+                "to": "172.31.52.10/32",
+                "via": "10.200.0.1"
+              }
+            ]
+          }
+        ],
+        "loopback_cidr": "10.254.50.2/32",
+        "image_name": "focal-server-cloudimg-amd64.img",
+        "vcpus": 1,
+        "ram_mb": 256,
+        "disk_gb": 10,
+        "internet": false,
+        "preferred_worker": null,
+        "stored_filename": "focal-server-cloudimg-amd64.img",
+        "image_sync": {
+          "headnode": "cached",
+          "worker": "cached"
+        }
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "from": "vm1",
+        "to": "vm2",
+        "vlan_id": 300
+      }
+    ],
+    "nat": {
+      "enabled": true,
+      "ifname": "nat302",
+      "vlan_id": 302,
+      "subnet_cidr": "172.31.52.0/24",
+      "gateway_ip_cidr": "172.31.52.1/24",
+      "use_dhcp": false,
+      "reservations": [],
+      "ssh_forwards": [
+        {
+          "vm": "vm1",
+          "target_ip": "172.31.52.10",
+          "target_port": 22,
+          "headnode_ip": "10.0.10.4",
+          "ssh_port": 2201,
+          "ssh_command": "ssh -p 2201 ubuntu@10.0.10.4"
+        }
+      ]
+    },
+    "dhcp": []
+  }
+]

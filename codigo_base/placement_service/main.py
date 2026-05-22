@@ -18,7 +18,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'slice_manager'))
 
 from database import get_db
-from placement import assign_vms, update_server_resources
+from codigo_base.placement_service.placement import assign_vms, update_server_resources
 from models import ServidorFisico
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')

@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from ssh_client import SSHClient
+from codigo_base.linux_driver.ssh_client import SSHClient
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +310,7 @@ class VMManager:
         return vms
 
     def _get_gateway_port(self) -> int:
-        from ssh_client import SERVERS_INTERNAL, SERVERS_VIA_GATEWAY
+        from codigo_base.linux_driver.ssh_client import SERVERS_INTERNAL, SERVERS_VIA_GATEWAY
         for name, ip in SERVERS_INTERNAL.items():
             if ip == self.ssh.host:
                 return SERVERS_VIA_GATEWAY.get(name, 22)

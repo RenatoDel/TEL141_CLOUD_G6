@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Terminal VM · PUCP Cloud</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="https://unpkg.com/xterm/css/xterm.css">
+  <style>
+    .shell{
+      min-height:100vh;
+      background:linear-gradient(180deg,#0b1120,#0f1830);
+      color:#e8efff;
+      display:flex;
+      flex-direction:column;
+    }
+    .top{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:12px;
+      padding:14px 18px;
+      border-bottom:1px solid rgba(255,255,255,.08);
+      background:rgba(9,14,27,.9);
+      flex-wrap:wrap;
+    }
+    .meta{color:var(--muted);font-size:13px;margin-top:4px}
+    .stage{padding:18px;display:flex;flex-direction:column;gap:14px;flex:1}
+    .status{
+      padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.08);
+      background:#122044;font-size:13px;white-space:pre-wrap
+    }
+    #terminalMount{
+      flex:1;min-height:72vh;border-radius:18px;overflow:hidden;
+      border:1px solid rgba(255,255,255,.08);background:#050b18;padding:10px
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top">
+      <div>
+        <h1 id="title" style="margin:0;font-size:20px">Terminal VM</h1>
+        <div id="subtitle" class="meta">Cargando parámetros...</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn-secondary" onclick="history.back()">Volver</button>
+        <button class="btn-secondary" id="reloadBtn">Reconectar</button>
+        <button class="btn-secondary" id="clearBtn">Limpiar</button>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div id="statusBox" class="status">Inicializando terminal serial...</div>
+      <div id="terminalMount"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script src="https://unpkg.com/xterm/lib/xterm.js"></script>
+  <script src="https://unpkg.com/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+  <script>
+    CloudUI.requireAuth();
+
+    const params = new URLSearchParams(window.location.search);
+    const worker = params.get("worker") || "";
+    const vm = params.get("vm") || "";
+    const name = params.get("name") || vm || "VM";
+
+    const title = document.getElementById("title");
+    const subtitle = document.getElementById("subtitle");
+    const statusBox = document.getElementById("statusBox");
+    const reloadBtn = document.getElementById("reloadBtn");
+    const clearBtn = document.getElementById("clearBtn");
+
+    let term = null;
+    let fitAddon = null;
+    let ws = null;
+
+    title.textContent = `Terminal VM · ${name}`;
+    subtitle.textContent = `worker=${worker || "-"} · vm=${vm || "-"}`;
+
+    function setStatus(text) {
+      statusBox.textContent = text;
+    }
+
+    function wsUrl() {
+      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+      const token = encodeURIComponent(CloudUI.getToken());
+      return `${scheme}://${window.location.host}/ws/vm-serial?worker=${encodeURIComponent(worker)}&vm=${encodeURIComponent(vm)}&token=${token}`;
+    }
+
+    function destroy() {
+      try { if (ws) ws.close(); } catch (_) {}
+      ws = null;
+      try { if (term) term.dispose(); } catch (_) {}
+      term = null;
+      fitAddon = null;
+      document.getElementById("terminalMount").innerHTML = "";
+    }
+
+    function connect() {
+      destroy();
+
+      if (!worker || !vm) {
+        setStatus("Faltan parámetros worker o vm.");
+        return;
+      }
+
+      term = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        convertEol: true,
+        theme: { background: "#050b18", foreground: "#e5edff" }
+      });
+
+      fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(document.getElementById("terminalMount"));
+      fitAddon.fit();
+      term.focus();
+
+      setStatus(`Conectando serial de ${vm} en ${worker}...`);
+      term.writeln("[PUCP Cloud] Abriendo terminal serial de la VM...");
+      term.writeln("");
+
+      ws = new WebSocket(wsUrl());
+
+      ws.onopen = () => {
+        setStatus(`Conectado a serial VM ${vm} en ${worker}`);
+        ws.send(`__resize__:${term.cols}:${term.rows}`);
+      };
+
+      ws.onmessage = (ev) => term.write(ev.data);
+
+      ws.onclose = () => {
+        setStatus("Sesión serial cerrada");
+        term.writeln("\r\n[PUCP Cloud] Sesión finalizada.");
+      };
+
+      ws.onerror = () => {
+        setStatus("Error en websocket serial");
+        term.writeln("\r\n[PUCP Cloud] Error en websocket serial.");
+      };
+
+      term.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(data);
+        }
+      });
+
+      window.onresize = () => {
+        if (!term || !fitAddon || !ws) return;
+        fitAddon.fit();
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(`__resize__:${term.cols}:${term.rows}`);
+        }
+      };
+    }
+
+    reloadBtn.addEventListener("click", connect);
+    clearBtn.addEventListener("click", () => { if (term) term.clear(); });
+
+    connect();
+  </script>
+</body>
+</html>

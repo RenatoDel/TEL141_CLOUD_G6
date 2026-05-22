@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url=/login.html">
+  <title>PUCP Private Cloud</title>
+</head>
+<body>
+  <script>
+    const token = localStorage.getItem("pucp_token");
+    window.location.href = token ? "/dashboard.html" : "/login.html";
+  </script>
+</body>
+</html>

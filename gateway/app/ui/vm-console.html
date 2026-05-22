@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Consola web · PUCP Cloud</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css">
+  <style>
+    .console-shell{
+      min-height:100vh;
+      background:linear-gradient(180deg,#0b1120,#0f1830);
+      color:#e8efff;
+      display:flex;
+      flex-direction:column;
+    }
+    .console-topbar{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:12px;
+      padding:14px 18px;
+      border-bottom:1px solid rgba(255,255,255,.08);
+      background:rgba(9,14,27,.9);
+      backdrop-filter:blur(8px);
+      flex-wrap:wrap;
+    }
+    .console-topbar h1{
+      margin:0;
+      font-size:20px;
+    }
+    .console-meta{
+      color:var(--muted);
+      font-size:13px;
+      margin-top:4px;
+    }
+    .console-actions{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .console-stage{
+      flex:1;
+      display:flex;
+      flex-direction:column;
+      padding:18px;
+      gap:14px;
+    }
+    .console-status{
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.08);
+      background:#122044;
+      font-size:13px;
+      white-space:pre-wrap;
+      word-break:break-word;
+    }
+    #screen{
+      flex:1;
+      min-height:72vh;
+      border-radius:18px;
+      overflow:hidden;
+      border:1px solid rgba(255,255,255,.08);
+      background:#000;
+      box-shadow:0 18px 40px rgba(0,0,0,.28);
+    }
+    #screen canvas{
+      outline:none;
+    }
+  </style>
+</head>
+<body>
+  <div class="console-shell">
+    <div class="console-topbar">
+      <div>
+        <h1 id="title">Consola web</h1>
+        <div class="console-meta" id="subtitle">Cargando parámetros...</div>
+      </div>
+      <div class="console-actions">
+        <button class="btn-secondary" onclick="history.back()">Volver</button>
+        <button class="btn-secondary" id="reloadBtn">Reconectar</button>
+        <button class="btn-primary" id="cadBtn">Ctrl+Alt+Del</button>
+      </div>
+    </div>
+
+    <div class="console-stage">
+      <div class="console-status" id="statusBox">Inicializando consola...</div>
+      <div id="screen"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script type="module">
+    import RFB from "/static/vendor/novnc/core/rfb.js";
+
+    CloudUI.requireAuth();
+
+    const params = new URLSearchParams(window.location.search);
+    const worker = params.get("worker") || "";
+    const port = params.get("port") || "";
+    const name = params.get("name") || "VM";
+
+    const title = document.getElementById("title");
+    const subtitle = document.getElementById("subtitle");
+    const statusBox = document.getElementById("statusBox");
+    const screen = document.getElementById("screen");
+    const reloadBtn = document.getElementById("reloadBtn");
+    const cadBtn = document.getElementById("cadBtn");
+
+    let rfb = null;
+
+    title.textContent = `Consola web · ${name}`;
+    subtitle.textContent = `worker=${worker || "-"} · vnc_port=${port || "-"}`;
+
+    function wsUrl() {
+      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+      const token = encodeURIComponent(CloudUI.getToken());
+      return `${scheme}://${window.location.host}/ws/vnc-proxy?worker=${encodeURIComponent(worker)}&port=${encodeURIComponent(port)}&token=${token}`;
+    }
+
+    function setStatus(text) {
+      statusBox.textContent = text;
+    }
+
+    function disconnect() {
+      if (rfb) {
+        try { rfb.disconnect(); } catch (_) {}
+        rfb = null;
+      }
+    }
+
+    function connect() {
+      disconnect();
+
+      if (!worker || !port) {
+        setStatus("Faltan parámetros worker o port.");
+        return;
+      }
+
+      try {
+        setStatus(`Conectando a ${worker}:${port} vía /ws/vnc-proxy ...`);
+
+        rfb = new RFB(screen, wsUrl(), {});
+        rfb.scaleViewport = true;
+        rfb.resizeSession = true;
+        rfb.clipViewport = false;
+        rfb.viewOnly = false;
+        rfb.focusOnClick = true;
+        rfb.background = "#000000";
+
+        rfb.addEventListener("connect", () => {
+          setStatus(`Conectado a ${worker}:${port}`);
+        });
+
+        rfb.addEventListener("disconnect", (e) => {
+          setStatus(`Sesión cerrada${e?.detail?.clean ? "" : " con error"}`);
+        });
+
+        rfb.addEventListener("credentialsrequired", () => {
+          setStatus("El servidor VNC solicita credenciales.");
+        });
+
+        rfb.addEventListener("securityfailure", (e) => {
+          setStatus(`Fallo de seguridad VNC: ${JSON.stringify(e?.detail || {})}`);
+        });
+
+      } catch (err) {
+        setStatus(`Error abriendo consola web:\n${err?.message || err}`);
+        console.error(err);
+      }
+    }
+
+    reloadBtn.addEventListener("click", connect);
+    cadBtn.addEventListener("click", () => {
+      if (rfb) rfb.sendCtrlAltDel();
+    });
+
+    window.addEventListener("beforeunload", disconnect);
+
+    connect();
+  </script>
+</body>
+</html>
