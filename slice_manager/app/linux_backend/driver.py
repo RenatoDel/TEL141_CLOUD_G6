@@ -801,6 +801,38 @@ class LinuxDriver:
                 "reservations": nat_reservations,
             }
 
+        elif internet_mode == "provider_network" and internet_nodes:
+            PROVIDER_SUBNET = "10.60.11.0/24"
+            PROVIDER_GATEWAY = "10.60.11.1"
+            PROVIDER_VLAN_ID = 0  # sin tag — cambiar cuando Branko confirme el VLAN ID
+            ip_host = 10
+            for node in nodes:
+                if not node.get("internet"):
+                    continue
+                tap_name = self._graph_nat_tap_name(node["name"])
+                mac = self._stable_mac(f"{slice_id}:{node['name']}:provider:{tap_name}")
+                assigned_ip = f"10.60.11.{ip_host}"
+                nat_payload = {
+                    "link_id": "provider",
+                    "peer": "gateway",
+                    "vlan_id": PROVIDER_VLAN_ID,
+                    "tap_name": tap_name,
+                    "mac_address": mac,
+                    "ip_cidr": f"{assigned_ip}/24",
+                    "gateway4": PROVIDER_GATEWAY,
+                    "nameservers": ["8.8.8.8", "1.1.1.1"],
+                }
+                node_interfaces[node["name"]].append(nat_payload)
+                ip_host += 1
+            nat_meta = {
+                "enabled": True,
+                "mode": "provider_network",
+                "subnet_cidr": PROVIDER_SUBNET,
+                "gateway_ip_cidr": f"{PROVIDER_GATEWAY}/24",
+                "use_dhcp": False,
+                "reservations": [],
+            }
+
         self._apply_graph_routing(vlan_base, nodes, links, node_interfaces)
         return links_out, node_interfaces, nat_meta, dhcp_networks
 
@@ -867,7 +899,11 @@ class LinuxDriver:
                 net_mgr = NetworkManager(headnode)
 
                 if nat_meta and nat_meta.get("enabled"):
-                    if nat_meta.get("use_dhcp"):
+                    if nat_meta.get("mode") == "provider_network":
+                        # Conectar TAPs al OFS sin tag — no se configura nada en el headnode
+                        # El Gateway físico maneja el routing
+                        nat_ready = True
+                    elif nat_meta.get("use_dhcp"):
                         net_mgr.ensure_vlan_dhcp(
                             ifname=nat_meta["ifname"],
                             vlan_id=nat_meta["vlan_id"],
@@ -878,6 +914,7 @@ class LinuxDriver:
                             provide_dns=True,
                             enable_nat=True,
                         )
+                        nat_ready = True
                     else:
                         net_mgr.ensure_headnode_nat(
                             ifname=nat_meta["ifname"],
@@ -885,7 +922,7 @@ class LinuxDriver:
                             headnode_ip_cidr=nat_meta["gateway_ip_cidr"],
                             subnet_cidr=nat_meta["subnet_cidr"],
                         )
-                    nat_ready = True
+                        nat_ready = True
 
                 for dhcp in dhcp_networks:
                     net_mgr.ensure_vlan_dhcp(
@@ -900,7 +937,7 @@ class LinuxDriver:
                     )
                     dhcp_ready.append(dhcp)
 
-                if nat_meta and nat_meta.get("enabled"):
+                if nat_meta and nat_meta.get("enabled") and nat_meta.get("mode") != "provider_network":
                     self._ensure_graph_ssh_forwards(
                         headnode=headnode,
                         nat_meta=nat_meta,
@@ -1018,19 +1055,21 @@ class LinuxDriver:
                 net_mgr = NetworkManager(headnode)
 
                 if nat and nat.get("enabled"):
-                    self._remove_graph_ssh_forwards(headnode, nat.get("ssh_forwards", []))
-
-                    if nat.get("use_dhcp"):
-                        net_mgr.remove_vlan_dhcp(
-                            ifname=nat["ifname"],
-                            subnet_cidr=nat["subnet_cidr"],
-                            vlan_id=nat["vlan_id"],
-                        )
+                    if nat.get("mode") == "provider_network":
+                        pass  # nada que limpiar en el headnode
                     else:
-                        net_mgr.remove_headnode_nat(
-                            ifname=nat["ifname"],
-                            subnet_cidr=nat["subnet_cidr"],
-                        )
+                        self._remove_graph_ssh_forwards(headnode, nat.get("ssh_forwards", []))
+                        if nat.get("use_dhcp"):
+                            net_mgr.remove_vlan_dhcp(
+                                ifname=nat["ifname"],
+                                subnet_cidr=nat["subnet_cidr"],
+                                vlan_id=nat["vlan_id"],
+                            )
+                        else:
+                            net_mgr.remove_headnode_nat(
+                                ifname=nat["ifname"],
+                                subnet_cidr=nat["subnet_cidr"],
+                            )
 
                 for item in dhcp or []:
                     net_mgr.remove_vlan_dhcp(
@@ -1058,19 +1097,22 @@ class LinuxDriver:
                 net_mgr = NetworkManager(headnode)
 
                 if nat and nat.get("enabled"):
-                    self._remove_graph_ssh_forwards(headnode, nat.get("ssh_forwards", []))
-
-                    if nat.get("use_dhcp"):
-                        net_mgr.remove_vlan_dhcp(
-                            ifname=nat["ifname"],
-                            subnet_cidr=nat["subnet_cidr"],
-                            vlan_id=nat["vlan_id"],
-                        )
+                    if nat.get("mode") == "provider_network":
+                        pass  # nada que limpiar en el headnode
                     else:
-                        net_mgr.remove_headnode_nat(
-                            ifname=nat["ifname"],
-                            subnet_cidr=nat["subnet_cidr"],
-                        )
+                        self._remove_graph_ssh_forwards(headnode, nat.get("ssh_forwards", []))
+
+                        if nat.get("use_dhcp"):
+                            net_mgr.remove_vlan_dhcp(
+                                ifname=nat["ifname"],
+                                subnet_cidr=nat["subnet_cidr"],
+                                vlan_id=nat["vlan_id"],
+                            )
+                        else:
+                            net_mgr.remove_headnode_nat(
+                                ifname=nat["ifname"],
+                                subnet_cidr=nat["subnet_cidr"],
+                            )
 
                 for item in dhcp or []:
                     net_mgr.remove_vlan_dhcp(

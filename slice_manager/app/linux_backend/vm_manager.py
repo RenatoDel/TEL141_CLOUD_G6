@@ -357,9 +357,15 @@ rm -f {pid_file} {monitor} {serial_path}
                 self.ssh.sudo(f"ip link set {iface.tap_name} up")
 
             if iface.tap_name not in existing_ports:
-                self.ssh.sudo(
-                    f"ovs-vsctl add-port {config.ovs_bridge} {iface.tap_name} tag={iface.vlan_id}"
-                )
+                if iface.vlan_id == 0:
+                    # sin tag VLAN — acceso directo al OFS para provider network
+                    self.ssh.sudo(
+                        f"ovs-vsctl add-port {config.ovs_bridge} {iface.tap_name}"
+                    )
+                else:
+                    self.ssh.sudo(
+                        f"ovs-vsctl add-port {config.ovs_bridge} {iface.tap_name} tag={iface.vlan_id}"
+                    )
 
         self._create_seed_image(config, interfaces)
 

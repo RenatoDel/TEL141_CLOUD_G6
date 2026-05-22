@@ -36,7 +36,7 @@ class GraphSliceCreateRequest(BaseModel):
     vlan_base: int = Field(ge=100, le=3990)
     vnc_start: int = Field(default=5901, ge=5901, le=65000)
     network_backend: Literal["vlan", "vxlan"] = "vlan"
-    internet_mode: Literal["none", "headnode_nat"] = "none"
+    internet_mode: Literal["none", "headnode_nat", "provider_network"] = "none"
     nodes: list[GraphNodeSpec]
     links: list[GraphLinkSpec]
 
@@ -63,7 +63,7 @@ class GraphSliceCreateRequest(BaseModel):
             if link.to_node not in node_set:
                 raise ValueError(f"El enlace {link.id} usa un nodo inexistente: {link.to_node}")
 
-        if self.internet_mode == "headnode_nat" and not any(n.internet for n in self.nodes):
-            raise ValueError("Con internet_mode=headnode_nat al menos un nodo debe tener internet=true")
+        if self.internet_mode in {"headnode_nat", "provider_network"} and not any(n.internet for n in self.nodes):
+            raise ValueError("Con internet_mode=headnode_nat o provider_network al menos un nodo debe tener internet=true")
 
         return self
