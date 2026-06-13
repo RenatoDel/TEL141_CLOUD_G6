@@ -355,11 +355,10 @@ class OpenStackClient:
             "enable_dhcp": enable_dhcp,
             "project_id": project_id,
         }
-        # En un segmento L2 aislado (link punto a punto, sin router) el gateway
-        # no se usa. Con gateway por defecto Neutron reserva la primera IP y un
-        # /30 queda con UNA sola IP asignable → el 2do puerto del link falla con
-        # 409 (IpAddressGenerationFailure). Al desactivarlo, el /30 deja .1 y .2
-        # asignables = exactamente los 2 extremos del link.
+        # Segmento L2 aislado (link punto a punto, sin router): el gateway no se
+        # usa y, con uno por defecto, Neutron reserva la 1ra IP → el /30 queda
+        # con una sola IP asignable y el 2do puerto falla con 409. Desactivado,
+        # el /30 deja .1 y .2 = los 2 extremos del link.
         if disable_gateway:
             subnet["gateway_ip"] = None  # serializa a null → sin gateway
         r = self._request(
