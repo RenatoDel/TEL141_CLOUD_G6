@@ -11,6 +11,17 @@ Flujo interno (por slice):
   6. Neutron   → crear puertos (uno por VM por link)
   7. Nova      → crear instancias con los puertos asignados (round-robin entre compute nodes)
   8. Nova      → obtener URL de consola noVNC (con fallback a endpoint legacy)
+
+Mejoras de esta versión:
+  - Helper único de HTTP (_request) que loggea el body completo en cada error.
+  - create_port idempotente: ante 409 reutiliza el puerto existente por nombre.
+  - OS_PHYSNET configurable (Kolla puede usar physnet0/physnet1/etc).
+  - Idempotencia completa: proyecto/redes/subnets/puertos/VMs se reutilizan si existen.
+  - Logging estructurado con prefijo [slice_id] en cada paso.
+  - _rollback espera (polling) a que las VMs queden DELETED antes de borrar puertos.
+  - wait_for_server_active renueva el token scoped si el polling supera 60s.
+  - get_console_url cae a os-getVNCConsole (legacy) si remote-consoles da 404.
+  - Placement real: round-robin entre OS_COMPUTE_NODES usando AZ "nova:<compute_node>".
 """
 
 from __future__ import annotations
@@ -334,20 +345,27 @@ class OpenStackClient:
 
     def create_subnet(self, name: str, network_id: str, cidr: str,
                       token: str, project_id: str,
-                      enable_dhcp: bool = False) -> dict:
+                      enable_dhcp: bool = False,
+                      disable_gateway: bool = True) -> dict:
+        subnet = {
+            "name": name,
+            "network_id": network_id,
+            "ip_version": 4,
+            "cidr": cidr,
+            "enable_dhcp": enable_dhcp,
+            "project_id": project_id,
+        }
+        # En un segmento L2 aislado (link punto a punto, sin router) el gateway
+        # no se usa. Con gateway por defecto Neutron reserva la primera IP y un
+        # /30 queda con UNA sola IP asignable → el 2do puerto del link falla con
+        # 409 (IpAddressGenerationFailure). Al desactivarlo, el /30 deja .1 y .2
+        # asignables = exactamente los 2 extremos del link.
+        if disable_gateway:
+            subnet["gateway_ip"] = None  # serializa a null → sin gateway
         r = self._request(
             "POST", f"{self.neutron_url()}/v2.0/subnets",
             token=token, ok=(200, 201),
-            json={
-                "subnet": {
-                    "name": name,
-                    "network_id": network_id,
-                    "ip_version": 4,
-                    "cidr": cidr,
-                    "enable_dhcp": enable_dhcp,
-                    "project_id": project_id,
-                }
-            },
+            json={"subnet": subnet},
         )
         return r.json()["subnet"]
 
