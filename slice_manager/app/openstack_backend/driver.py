@@ -28,22 +28,18 @@ logger = logging.getLogger("openstack_driver")
 # ─────────────────────────────────────────────────────────────
 import os
 
-OS_AUTH_URL: str = os.getenv("OS_AUTH_URL", "http://controller:5000/v3")
-OS_USERNAME: str = os.getenv("OS_USERNAME", "cloud_admin")
-OS_PASSWORD: str = os.getenv("OS_PASSWORD", "66c5f106f03328bbb47bd5ec609c320e")
-OS_PROJECT_NAME: str = os.getenv("OS_PROJECT_NAME", "cloud_admin")
-OS_USER_DOMAIN_NAME: str = os.getenv("OS_USER_DOMAIN_NAME", "Cloud")
-OS_PROJECT_DOMAIN_NAME: str = os.getenv("OS_PROJECT_DOMAIN_NAME", "Cloud")
-OS_DOMAIN_NAME: str = os.getenv("OS_DOMAIN_NAME", "Cloud")
-OS_DOMAIN_ID: str = os.getenv("OS_DOMAIN_ID", "ff80f00b054f4c4abd3a00d3de1bf48f")
-
-# Usuario del grupo para los slices
-OS_SLICE_USER: str = os.getenv("OS_SLICE_USER", "userG6")
-OS_SLICE_USER_PASSWORD: str = os.getenv("OS_SLICE_USER_PASSWORD", "userG6")
-
-# IDs fijos (se pueden sobreescribir con env vars)
-OS_FLAVOR_ID: str = os.getenv("OS_FLAVOR_ID", "eb0bdaf9-4803-415c-8857-7956fefead50")
-OS_IMAGE_NAME: str = os.getenv("OS_IMAGE_NAME", "cirros")
+def OS_AUTH_URL(): return os.environ.get("OS_AUTH_URL", "http://controller:5000/v3")
+def OS_USERNAME(): return os.environ.get("OS_USERNAME", "cloud_admin")
+def OS_PASSWORD(): return os.environ.get("OS_PASSWORD", "66c5f106f03328bbb47bd5ec609c320e")
+def OS_PROJECT_NAME(): return os.environ.get("OS_PROJECT_NAME", "cloud_admin")
+def OS_USER_DOMAIN_NAME(): return os.environ.get("OS_USER_DOMAIN_NAME", "Cloud")
+def OS_PROJECT_DOMAIN_NAME(): return os.environ.get("OS_PROJECT_DOMAIN_NAME", "Cloud")
+def OS_DOMAIN_NAME(): return os.environ.get("OS_DOMAIN_NAME", "Cloud")
+def OS_DOMAIN_ID(): return os.environ.get("OS_DOMAIN_ID", "ff80f00b054f4c4abd3a00d3de1bf48f")
+def OS_SLICE_USER(): return os.environ.get("OS_SLICE_USER", "userG6")
+def OS_SLICE_USER_PASSWORD(): return os.environ.get("OS_SLICE_USER_PASSWORD", "userG6")
+def OS_FLAVOR_ID(): return os.environ.get("OS_FLAVOR_ID", "eb0bdaf9-4803-415c-8857-7956fefead50")
+def OS_IMAGE_NAME(): return os.environ.get("OS_IMAGE_NAME", "cirros")
 
 TIMEOUT = 60.0
 VM_ACTIVE_TIMEOUT = 120  # segundos máximos esperando ACTIVE
@@ -79,23 +75,23 @@ class OpenStackClient:
                     "methods": ["password"],
                     "password": {
                         "user": {
-                            "name": OS_USERNAME,
-                            "password": OS_PASSWORD,
-                            "domain": {"name": OS_USER_DOMAIN_NAME},
+                            "name": OS_USERNAME(),
+                            "password": OS_PASSWORD(),
+                            "domain": {"name": OS_USER_DOMAIN_NAME()},
                         }
                     },
                 },
                 "scope": {
                     "project": {
-                        "name": OS_PROJECT_NAME,
-                        "domain": {"name": OS_PROJECT_DOMAIN_NAME},
+                        "name": OS_PROJECT_NAME(),
+                        "domain": {"name": OS_PROJECT_DOMAIN_NAME()},
                     }
                 },
             }
         }
 
         r = httpx.post(
-            f"{OS_AUTH_URL}/auth/tokens",
+            f"{OS_AUTH_URL()}/auth/tokens",
             json=payload,
             timeout=TIMEOUT,
         )
@@ -120,7 +116,7 @@ class OpenStackClient:
         }
 
         r = httpx.post(
-            f"{OS_AUTH_URL}/auth/tokens",
+            f"{OS_AUTH_URL()}/auth/tokens",
             json=payload,
             timeout=TIMEOUT,
         )
@@ -148,7 +144,7 @@ class OpenStackClient:
     # ── Endpoints ─────────────────────────────────────────────
 
     def keystone_url(self) -> str:
-        return self._endpoints.get("identity", OS_AUTH_URL)
+        return self._endpoints.get("identity", OS_AUTH_URL())
 
     def nova_url(self) -> str:
         return self._endpoints.get("compute", f"http://controller:8774/v2.1")
@@ -537,23 +533,23 @@ class OpenStackDriver:
         """
         # Crear o buscar proyecto
         existing = self.client.get_project_by_name(
-            slice_id, OS_DOMAIN_ID, admin_token
+            slice_id, OS_DOMAIN_ID(), admin_token
         )
         if existing:
             project_id = existing["id"]
             logger.info("Proyecto %r ya existe: %s", slice_id, project_id)
         else:
-            project = self.client.create_project(slice_id, OS_DOMAIN_ID, admin_token)
+            project = self.client.create_project(slice_id, OS_DOMAIN_ID(), admin_token)
             project_id = project["id"]
             logger.info("Proyecto %r creado: %s", slice_id, project_id)
 
         # Buscar userG6 y rol member
-        user = self.client.get_user_by_name(OS_SLICE_USER, OS_DOMAIN_ID, admin_token)
+        user = self.client.get_user_by_name(OS_SLICE_USER(), OS_DOMAIN_ID(), admin_token)
         role = self.client.get_role_by_name("member", admin_token)
 
         if user and role:
             self.client.assign_role(project_id, user["id"], role["id"], admin_token)
-            logger.info("Rol member asignado a %s en proyecto %s", OS_SLICE_USER, slice_id)
+            logger.info("Rol member asignado a %s en proyecto %s", OS_SLICE_USER(), slice_id)
 
         # Token scoped al proyecto
         scoped_token = self.client.get_scoped_token(project_id)
@@ -620,7 +616,7 @@ class OpenStackDriver:
             # 2. Imagen y flavor
             image_names = list({n["image_name"] for n in nodes})
             image_id = self._get_image_id(image_names[0], admin_token)
-            flavor_id = OS_FLAVOR_ID
+            flavor_id = OS_FLAVOR_ID()
             logger.info("Usando imagen %s, flavor %s", image_id, flavor_id)
 
             # 3. Security group
@@ -825,7 +821,7 @@ class OpenStackDriver:
 
             # Buscar proyecto del slice
             project = self.client.get_project_by_name(
-                slice_id, OS_DOMAIN_ID, admin_token
+                slice_id, OS_DOMAIN_ID(), admin_token
             )
             if not project:
                 logger.warning("Proyecto %r no encontrado en OpenStack", slice_id)
