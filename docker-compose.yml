@@ -1,0 +1,156 @@
+version: "3.9"
+
+services:
+
+  # ─────────────────────────────────────────────
+  # Base de datos
+  # ─────────────────────────────────────────────
+  mariadb:
+    image: mariadb:11
+    container_name: pucp_mariadb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_pass
+      MYSQL_DATABASE: pucp_cloud
+      MYSQL_USER: pucp
+      MYSQL_PASSWORD: pucp_pass
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./sql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - pucp_net
+    healthcheck:
+      test: ["CMD", "mariadb", "-u", "pucp", "-ppucp_pass", "-e", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # Auth Service  (puerto 9001)
+  # ─────────────────────────────────────────────
+  auth_service:
+    build: ./auth_service
+    container_name: pucp_auth
+    restart: unless-stopped
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_ALGORITHM: HS256
+      DB_HOST: mariadb
+      DB_USER: pucp
+      DB_PASS: pucp_pass
+      DB_NAME: pucp_cloud
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - pucp_net
+
+  # ─────────────────────────────────────────────
+  # Placement Service  (puerto 9003)
+  # ─────────────────────────────────────────────
+  placement_service:
+    build: ./placement_service
+    container_name: pucp_placement
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: mariadb
+      DB_USER: pucp
+      DB_PASS: pucp_pass
+      DB_NAME: pucp_cloud
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - pucp_net
+
+  # ─────────────────────────────────────────────
+  # Image Service  (puerto 9004)
+  # ─────────────────────────────────────────────
+  image_service:
+    build: ./image_service
+    container_name: pucp_image
+    restart: unless-stopped
+    environment:
+      DB_HOST: mariadb
+      DB_USER: pucp
+      DB_PASS: pucp_pass
+      DB_NAME: pucp_cloud
+      IMAGE_DIR: /app/images
+    volumes:
+      - vm_images:/app/images
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - pucp_net
+
+  # ─────────────────────────────────────────────
+  # Slice Manager  (puerto 9002)
+  # ─────────────────────────────────────────────
+  slice_manager:
+    build: ./slice_manager
+    container_name: pucp_slice
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: mariadb
+      DB_USER: pucp
+      DB_PASS: pucp_pass
+      DB_NAME: pucp_cloud
+      PLACEMENT_SERVICE_URL: http://placement_service:9003
+      IMAGE_SERVICE_URL: http://image_service:9004
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    volumes:
+      - slice_state:/app/state
+      # Llave SSH para conectarse a los workers KVM
+      - ${SSH_KEY_PATH:-~/.ssh/id_ecdsa}:/root/.ssh/id_ecdsa:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      placement_service:
+        condition: service_started
+      image_service:
+        condition: service_started
+    networks:
+      - pucp_net
+
+  # ─────────────────────────────────────────────
+  # API Gateway  (puerto 8500 — punto de entrada)
+  # ─────────────────────────────────────────────
+  gateway:
+    build: ./gateway
+    container_name: pucp_gateway
+    restart: unless-stopped
+    ports:
+      - "8500:8500"
+    environment:
+      AUTH_SERVICE_URL: http://auth_service:9001
+      SLICE_SERVICE_URL: http://slice_manager:9002
+      PLACEMENT_SERVICE_URL: http://placement_service:9003
+      IMAGE_SERVICE_URL: http://image_service:9004
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    depends_on:
+      - auth_service
+      - slice_manager
+      - placement_service
+      - image_service
+    networks:
+      - pucp_net
+
+# ─────────────────────────────────────────────
+# Volúmenes persistentes
+# ─────────────────────────────────────────────
+volumes:
+  mariadb_data:
+  vm_images:
+  slice_state:
+
+# ─────────────────────────────────────────────
+# Red interna
+# ─────────────────────────────────────────────
+networks:
+  pucp_net:
+    driver: bridge
