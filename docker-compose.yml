@@ -106,7 +106,7 @@ services:
     volumes:
       - slice_state:/app/state
       # Llave SSH para conectarse a los workers KVM
-      - ${SSH_KEY_PATH:-~/.ssh/id_ecdsa}:/root/.ssh/id_ecdsa:ro
+      - /home/ubuntu/.ssh:/root/.ssh:ro
     depends_on:
       mariadb:
         condition: service_healthy
