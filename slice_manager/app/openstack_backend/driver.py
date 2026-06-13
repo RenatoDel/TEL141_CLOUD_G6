@@ -529,7 +529,7 @@ class OpenStackDriver:
     def _setup_project(self, slice_id: str, admin_token: str) -> tuple[str, str]:
         """
         Crea o reutiliza el proyecto OpenStack para el slice.
-        Asocia userG6 con rol member.
+        Asocia userG6 con rol member y cloud_admin con rol admin.
         Devuelve (project_id, scoped_token).
         """
         # Crear o buscar proyecto
@@ -544,13 +544,19 @@ class OpenStackDriver:
             project_id = project["id"]
             logger.info("Proyecto %r creado: %s", slice_id, project_id)
 
-        # Buscar userG6 y rol member
+        # Asignar rol member a userG6
         user = self.client.get_user_by_name(OS_SLICE_USER(), OS_DOMAIN_ID(), admin_token)
-        role = self.client.get_role_by_name("member", admin_token)
-
-        if user and role:
-            self.client.assign_role(project_id, user["id"], role["id"], admin_token)
+        role_member = self.client.get_role_by_name("member", admin_token)
+        if user and role_member:
+            self.client.assign_role(project_id, user["id"], role_member["id"], admin_token)
             logger.info("Rol member asignado a %s en proyecto %s", OS_SLICE_USER(), slice_id)
+
+        # Asignar rol admin a cloud_admin para poder obtener scoped token
+        admin_user = self.client.get_user_by_name(OS_USERNAME(), OS_DOMAIN_ID(), admin_token)
+        role_admin = self.client.get_role_by_name("admin", admin_token)
+        if admin_user and role_admin:
+            self.client.assign_role(project_id, admin_user["id"], role_admin["id"], admin_token)
+            logger.info("Rol admin asignado a %s en proyecto %s", OS_USERNAME(), slice_id)
 
         # Token scoped al proyecto
         scoped_token = self.client.get_scoped_token(project_id)
