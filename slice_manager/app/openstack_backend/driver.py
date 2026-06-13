@@ -712,10 +712,6 @@ class OpenStackDriver:
 
                 # Zona de disponibilidad basada en el worker asignado por CP-SAT
                 az = None
-                worker = node.get("server", "")
-                if worker:
-                    # Los workers OpenStack usan el hostname como AZ host
-                    az = f"nova:{worker}"
 
                 server = self.client.create_server(
                     name=node_name,
