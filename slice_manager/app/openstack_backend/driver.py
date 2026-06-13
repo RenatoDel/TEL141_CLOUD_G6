@@ -354,6 +354,7 @@ class OpenStackClient:
             "cidr": cidr,
             "enable_dhcp": enable_dhcp,
             "project_id": project_id,
+            "gateway_ip": None, 
         }
         # Segmento L2 aislado (link punto a punto, sin router): el gateway no se
         # usa y, con uno por defecto, Neutron reserva la 1ra IP → el /30 queda
@@ -365,6 +366,7 @@ class OpenStackClient:
             "POST", f"{self.neutron_url()}/v2.0/subnets",
             token=token, ok=(200, 201),
             json={"subnet": subnet},
+            
         )
         return r.json()["subnet"]
 
