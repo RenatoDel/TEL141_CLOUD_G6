@@ -37,6 +37,15 @@ class GraphSliceCreateRequest(BaseModel):
     vnc_start: int = Field(default=5901, ge=5901, le=65000)
     network_backend: Literal["vlan", "vxlan"] = "vlan"
     internet_mode: Literal["none", "headnode_nat", "provider_network"] = "none"
+
+    # Selección de cluster — el usuario elige uno de los dos
+    cluster: Literal["linux", "openstack"] = "linux"
+
+    # Zona de disponibilidad opcional — si se especifica, tiene prioridad sobre cluster
+    # Zonas Linux:     az-a, az-b
+    # Zonas OpenStack: az-openstack
+    availability_zone: Optional[str] = None
+
     nodes: list[GraphNodeSpec]
     links: list[GraphLinkSpec]
 
@@ -63,7 +72,19 @@ class GraphSliceCreateRequest(BaseModel):
             if link.to_node not in node_set:
                 raise ValueError(f"El enlace {link.id} usa un nodo inexistente: {link.to_node}")
 
-        if self.internet_mode in {"headnode_nat", "provider_network"} and not any(n.internet for n in self.nodes):
-            raise ValueError("Con internet_mode=headnode_nat o provider_network al menos un nodo debe tener internet=true")
+        if self.internet_mode in {"headnode_nat", "provider_network"} and not any(
+            n.internet for n in self.nodes
+        ):
+            raise ValueError(
+                "Con internet_mode=headnode_nat o provider_network "
+                "al menos un nodo debe tener internet=true"
+            )
+
+        # Si se especifica availability_zone, inferir cluster automáticamente
+        if self.availability_zone:
+            if self.availability_zone.lower() in {"az-openstack", "openstack"}:
+                object.__setattr__(self, "cluster", "openstack")
+            else:
+                object.__setattr__(self, "cluster", "linux")
 
         return self
