@@ -105,8 +105,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
     volumes:
       - slice_state:/app/state
-      # Llave SSH para conectarse a los workers KVM
       - /home/ubuntu/.ssh:/root/.ssh:ro
+      - ./slice_manager/app:/app/app
     depends_on:
       mariadb:
         condition: service_healthy
