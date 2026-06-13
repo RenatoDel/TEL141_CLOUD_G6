@@ -65,10 +65,7 @@ class OpenStackClient:
     # ── Keystone ──────────────────────────────────────────────
 
     def get_admin_token(self) -> str:
-        """Obtiene token administrativo del dominio Cloud."""
-        if self._admin_token:
-            return self._admin_token
-
+        """Obtiene token administrativo del dominio Cloud. Siempre fresco."""
         payload = {
             "auth": {
                 "identity": {
@@ -103,13 +100,17 @@ class OpenStackClient:
 
     def get_scoped_token(self, project_id: str) -> str:
         """Obtiene token scoped para un proyecto específico."""
-        admin_token = self.get_admin_token()
-
         payload = {
             "auth": {
                 "identity": {
-                    "methods": ["token"],
-                    "token": {"id": admin_token},
+                    "methods": ["password"],
+                    "password": {
+                        "user": {
+                            "name": OS_USERNAME(),
+                            "password": OS_PASSWORD(),
+                            "domain": {"name": OS_USER_DOMAIN_NAME()},
+                        }
+                    },
                 },
                 "scope": {"project": {"id": project_id}},
             }
