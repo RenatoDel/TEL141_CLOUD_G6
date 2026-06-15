@@ -153,6 +153,9 @@ class GraphOrchestrator:
         # Seleccionar driver correcto
         self._set_driver(cluster)
 
+        # Si es OpenStack y no se especificó zona, usar az-openstack por defecto
+        if cluster == OPENSTACK_CLUSTER and not zone:
+            zone = "az-openstack"
         # Obtener asignación óptima del placement_service
         assignments = await self._assign_workers(nodes, zone=zone, cluster=cluster)
 
