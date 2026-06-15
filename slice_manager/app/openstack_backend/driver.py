@@ -901,8 +901,9 @@ class OpenStackDriver:
                     })
 
                 # Placement: usar la asignación real del CP-SAT (placement_service)
+                # Cada worker tiene su propia availability zone dedicada (az-worker1, az-worker2, az-worker3)
                 worker = node.get("server", "")
-                az = f"nova:{worker}" if worker else None
+                az = f"az-{worker}" if worker else None
 
                 existing_server = self.client.get_server_by_name(
                     node_name, project_id, scoped_token
