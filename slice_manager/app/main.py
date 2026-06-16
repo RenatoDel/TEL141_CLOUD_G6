@@ -184,6 +184,7 @@ async def create_graph_slice(payload: GraphSliceCreateRequest, user=Depends(requ
     stored = {
         "mode": "graph",
         "slice_name": payload.slice_name,
+        "cluster": execution["cluster"],
         "network_backend": payload.network_backend,
         "internet_mode": payload.internet_mode,
         "vlan_base": payload.vlan_base,
