@@ -55,6 +55,9 @@ def OS_IMAGE_NAME(): return os.environ.get("OS_IMAGE_NAME", "cirros")
 # Red física del provider VLAN. En instalaciones Kolla puede ser physnet0.
 def OS_PHYSNET(): return os.environ.get("OS_PHYSNET", "physnet1")
 
+def OS_EXTERNAL_NETWORK_NAME(): return os.environ.get("OS_EXTERNAL_NETWORK_NAME", "external")
+
+
 # Compute nodes reales de OpenStack (verificados con `openstack compute service list`).
 # Si está vacío → Nova elige automáticamente (comportamiento anterior).
 def OS_COMPUTE_NODES() -> list[str]:
@@ -301,6 +304,20 @@ class OpenStackClient:
             "GET", f"{self.neutron_url()}/v2.0/networks",
             token=token, ok=(200,),
             params={"name": name, "project_id": project_id},
+        )
+        nets = r.json().get("networks", [])
+        return nets[0] if nets else None
+    
+    def get_network_by_name_global(self, name: str, token: str) -> Optional[dict]:
+        """
+        Busca una red por nombre sin filtrar por project_id. Necesario para
+        redes compartidas (shared=True) como la red 'external', que pertenece
+        al proyecto admin pero debe ser usable desde cualquier slice/proyecto.
+        """
+        r = self._request(
+            "GET", f"{self.neutron_url()}/v2.0/networks",
+            token=token, ok=(200,),
+            params={"name": name},
         )
         nets = r.json().get("networks", [])
         return nets[0] if nets else None
@@ -756,6 +773,56 @@ class OpenStackDriver:
             slog.warning("No se pudo crear security group: %s", exc)
             return ""
 
+    def _attach_internet_port(self, slice_id: str, node_name: str,
+                              scoped_token: str, project_id: str,
+                              slog: logging.LoggerAdapter) -> Optional[dict]:
+        """
+        Crea (o reutiliza) un puerto en la red 'external' (provider flat,
+        creada en el Lab5/6) para dar salida/entrada a Internet a un nodo
+        con internet=true. R5: acceso desde el exterior vía IP DHCP
+        sobre 10.60.X.0/24.
+
+        Devuelve el puerto creado o None si la red external no existe.
+        """
+        ext_network = self.client.get_network_by_name_global(
+            OS_EXTERNAL_NETWORK_NAME(), scoped_token
+        )
+        if not ext_network:
+            slog.warning(
+                "Red externa %r no encontrada — el nodo %s no tendrá salida a Internet. "
+                "Verifique que el Lab5/6 haya creado la red 'external'.",
+                OS_EXTERNAL_NETWORK_NAME(), node_name,
+            )
+            return None
+
+        port_name = f"port-ext-{slice_id}-{node_name}"
+        existing = self.client.get_port_by_name(port_name, project_id, scoped_token)
+        if existing:
+            slog.info("Puerto externo %s ya existe, reutilizando", port_name)
+            return existing
+
+        port = {
+            "name": port_name,
+            "network_id": ext_network["id"],
+            "admin_state_up": True,
+            "project_id": project_id,
+        }
+        r = self.client._request(
+            "POST", f"{self.client.neutron_url()}/v2.0/ports",
+            token=scoped_token, ok=(200, 201, 409), raise_for_status=False,
+            json={"port": port},
+        )
+        if r.status_code == 409:
+            existing = self.client.get_port_by_name(port_name, project_id, scoped_token)
+            if existing:
+                slog.info("Puerto externo %s reutilizado tras 409", port_name)
+                return existing
+            r.raise_for_status()
+
+        created = r.json()["port"]
+        slog.info("Puerto externo %s creado para nodo %s", port_name, node_name)
+        return created    
+
     # ── create_graph_slice ────────────────────────────────────
 
     def create_graph_slice(self, request: dict) -> dict:
@@ -900,6 +967,32 @@ class OpenStackDriver:
                         "cidr": net_info["cidr"],
                     })
 
+                # R5 — salida/entrada a Internet: puerto extra en la red 'external'
+                external_ip = None
+                if node.get("internet"):
+                    ext_port = self._attach_internet_port(
+                        slice_id, node_name, scoped_token, project_id, slog
+                    )
+                    if ext_port:
+                        port_ids.append(ext_port["id"])
+                        external_ip = (
+                            ext_port["fixed_ips"][0]["ip_address"]
+                            if ext_port.get("fixed_ips") else None
+                        )
+                        created_ports.append({
+                            "port_id": ext_port["id"],
+                            "token": scoped_token,
+                        })
+                        node_ifaces.append({
+                            "link_id": "external",
+                            "port_id": ext_port["id"],
+                            "mac_address": ext_port.get("mac_address"),
+                            "ip_address": external_ip,
+                            "network_id": ext_port.get("network_id"),
+                            "vlan_id": None,
+                            "cidr": None,
+                        })
+
                 # Placement: usar la asignación real del CP-SAT (placement_service)
                 # Cada worker tiene su propia availability zone dedicada (az-worker1, az-worker2, az-worker3)
                 worker = node.get("server", "")
@@ -955,6 +1048,7 @@ class OpenStackDriver:
                     "ram_mb": node.get("ram_mb", 512),
                     "disk_gb": node.get("disk_gb", 4),
                     "internet": node.get("internet", False),
+                    "external_ip": external_ip,
                     "project_id": project_id,
                 }
                 vm_results.append(vm_result)
