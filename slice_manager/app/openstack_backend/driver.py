@@ -775,22 +775,14 @@ class OpenStackDriver:
 
     def _attach_internet_port(self, slice_id: str, node_name: str,
                               scoped_token: str, project_id: str,
-                              slog: logging.LoggerAdapter) -> Optional[dict]:
-        """
-        Crea (o reutiliza) un puerto en la red 'external' (provider flat,
-        creada en el Lab5/6) para dar salida/entrada a Internet a un nodo
-        con internet=true. R5: acceso desde el exterior vía IP DHCP
-        sobre 10.60.X.0/24.
-
-        Devuelve el puerto creado o None si la red external no existe.
-        """
+                              slog: logging.LoggerAdapter,
+                              sg_id: Optional[str] = None) -> Optional[dict]:
         ext_network = self.client.get_network_by_name_global(
             OS_EXTERNAL_NETWORK_NAME(), scoped_token
         )
         if not ext_network:
             slog.warning(
-                "Red externa %r no encontrada — el nodo %s no tendrá salida a Internet. "
-                "Verifique que el Lab5/6 haya creado la red 'external'.",
+                "Red externa %r no encontrada — el nodo %s no tendrá salida a Internet.",
                 OS_EXTERNAL_NETWORK_NAME(), node_name,
             )
             return None
@@ -807,6 +799,9 @@ class OpenStackDriver:
             "admin_state_up": True,
             "project_id": project_id,
         }
+        if sg_id:
+            port["security_groups"] = [sg_id]
+
         r = self.client._request(
             "POST", f"{self.client.neutron_url()}/v2.0/ports",
             token=scoped_token, ok=(200, 201, 409), raise_for_status=False,
@@ -821,7 +816,7 @@ class OpenStackDriver:
 
         created = r.json()["port"]
         slog.info("Puerto externo %s creado para nodo %s", port_name, node_name)
-        return created    
+        return created  
 
     # ── create_graph_slice ────────────────────────────────────
 
@@ -971,7 +966,7 @@ class OpenStackDriver:
                 external_ip = None
                 if node.get("internet"):
                     ext_port = self._attach_internet_port(
-                        slice_id, node_name, scoped_token, project_id, slog
+                        slice_id, node_name, scoped_token, project_id, slog, sg_id=sg_id
                     )
                     if ext_port:
                         port_ids.append(ext_port["id"])
