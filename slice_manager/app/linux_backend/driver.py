@@ -1010,6 +1010,17 @@ class LinuxDriver:
                     )
                     raise
 
+            # R5 — OVS flows para aislar broadcasts por VLAN
+            try:
+                vlan_ids = [link["vlan_id"] for link in links_out]
+                if nat_meta and nat_meta.get("enabled"):
+                    vlan_ids.append(nat_meta["vlan_id"])
+                with self._headnode_client() as headnode:
+                    NetworkManager(headnode).apply_slice_flows(slice_id, vlan_ids)
+                logger.info("OVS flows aplicados para slice %s VLANs=%s", slice_id, vlan_ids)
+            except Exception as exc:
+                logger.warning("No se pudieron aplicar OVS flows para %s: %s", slice_id, exc)
+
             return {
                 "slice_id": slice_id,
                 "success": True,
@@ -1077,6 +1088,20 @@ class LinuxDriver:
                         subnet_cidr=item["subnet_cidr"],
                         vlan_id=item["vlan_id"],
                     )
+                # R5 — eliminar OVS flows del slice
+                try:
+                    vlan_ids = set()
+                    for vm in vms:
+                        for iface in vm.get("interfaces", []):
+                            if iface.get("vlan_id") is not None:
+                                vlan_ids.add(iface["vlan_id"])
+                    if nat and nat.get("enabled") and nat.get("vlan_id"):
+                        vlan_ids.add(nat["vlan_id"])
+                    if vlan_ids:
+                        net_mgr.remove_slice_flows(slice_id, list(vlan_ids))
+                        logger.info("OVS flows eliminados para slice %s", slice_id)
+                except Exception as exc:
+                    logger.warning("No se pudieron eliminar OVS flows para %s: %s", slice_id, exc)
         except Exception as exc:
             logger.error("Error borrando DHCP/NAT graph: %s", exc)
             success = False

@@ -220,3 +220,42 @@ class NetworkManager:
         self._sudo_try(f"ip addr flush dev {ifname}")
         self._sudo_try(f"ovs-vsctl --if-exists del-port {OVS_BRIDGE} {ifname}")
         self._sudo_try(f"ip link delete {ifname}")
+
+    # -------------------------------------------------------------------------
+    # R5 — OVS flow isolation
+    # -------------------------------------------------------------------------
+
+    def _ovs_cookie(self, slice_id: str, vlan_id: int) -> str:
+        import hashlib
+        h = int(hashlib.md5(f"{slice_id}:{vlan_id}".encode()).hexdigest()[:8], 16)
+        return f"0x{h:08x}"
+
+    def apply_slice_flows(self, slice_id: str, vlan_ids: list[int]):
+        if not vlan_ids:
+            return
+        cmds = []
+        for vlan_id in vlan_ids:
+            cookie = self._ovs_cookie(slice_id, vlan_id)
+            cmds.append(
+                f"ovs-ofctl add-flow {OVS_BRIDGE} "
+                f"\"cookie={cookie},priority=100,dl_vlan={vlan_id},actions=normal\""
+            )
+        drop_cookie = "0x00000001"
+        cmds.append(
+            f"ovs-ofctl add-flow {OVS_BRIDGE} "
+            f"\"cookie={drop_cookie},priority=1,dl_vlan=0xffff,actions=drop\" 2>/dev/null || true"
+        )
+        script = "set -e\n" + "\n".join(cmds)
+        self._sudo_bash(script)
+
+    def remove_slice_flows(self, slice_id: str, vlan_ids: list[int]):
+        if not vlan_ids:
+            return
+        cmds = []
+        for vlan_id in vlan_ids:
+            cookie = self._ovs_cookie(slice_id, vlan_id)
+            cmds.append(
+                f"ovs-ofctl del-flows {OVS_BRIDGE} \"cookie={cookie}/-1\" 2>/dev/null || true"
+            )
+        script = "\n".join(cmds)
+        self._sudo_bash(script)  
