@@ -38,13 +38,16 @@ class GraphSliceCreateRequest(BaseModel):
     network_backend: Literal["vlan", "vxlan"] = "vlan"
     internet_mode: Literal["none", "headnode_nat", "provider_network"] = "none"
 
-    # Selección de cluster — el usuario elige uno de los dos
+    # Selección de cluster
     cluster: Literal["linux", "openstack"] = "linux"
-
-    # Zona de disponibilidad opcional — si se especifica, tiene prioridad sobre cluster
-    # Zonas Linux:     az-a, az-b
-    # Zonas OpenStack: az-openstack
     availability_zone: Optional[str] = None
+
+    # ─── Ownership / curso (opcionales, controlados por RBAC) ─────────────
+    # Si se omiten: el dueño es el caller y curso_id queda en None.
+    # admin/profesor pueden setear owner_username distinto al caller.
+    # profesor: el curso_id debe ser uno que dicta.
+    owner_username: Optional[str] = None
+    curso_id: Optional[int] = None
 
     nodes: list[GraphNodeSpec]
     links: list[GraphLinkSpec]
@@ -80,7 +83,6 @@ class GraphSliceCreateRequest(BaseModel):
                 "al menos un nodo debe tener internet=true"
             )
 
-        # Si se especifica availability_zone, inferir cluster automáticamente
         if self.availability_zone:
             if self.availability_zone.lower() in {"az-openstack", "openstack"}:
                 object.__setattr__(self, "cluster", "openstack")
