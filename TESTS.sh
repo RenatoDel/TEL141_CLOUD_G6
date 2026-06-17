@@ -99,17 +99,21 @@ fi
 
 # ─── 6. Crear un slice como alumno1 ─────────────────────────────────
 yellow "=== 6. Alumno crea slice propio ==="
-SLICE_NAME="test-rbac-$(date +%s)"
+TS=$(date +%s)
+SLICE_NAME="test-rbac-$TS"
+VM_A="rbacvm-${TS}-a"
+VM_B="rbacvm-${TS}-b"
+VLAN_BASE=$(( (TS % 500) + 600 ))  # rango 600-1099, fuera de lo usado normalmente
 status=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
   -X POST "$GW/api/graph-slices" \
   -H "Authorization: Bearer $TOK_ALU1" \
   -H "Content-Type: application/json" \
   -d "{
     \"slice_name\":\"$SLICE_NAME\",
-    \"vlan_base\":700,
+    \"vlan_base\":$VLAN_BASE,
     \"cluster\":\"linux\",
-    \"nodes\":[{\"name\":\"vm1\"},{\"name\":\"vm2\"}],
-    \"links\":[{\"id\":\"l1\",\"from\":\"vm1\",\"to\":\"vm2\"}]
+    \"nodes\":[{\"name\":\"$VM_A\"},{\"name\":\"$VM_B\"}],
+    \"links\":[{\"id\":\"l1\",\"from\":\"$VM_A\",\"to\":\"$VM_B\"}]
   }")
 green "  POST /graph-slices como alumno1 → status $status"
 [[ "$status" == "200" || "$status" == "201" ]] || { cat /tmp/resp.json; exit 1; }
