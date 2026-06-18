@@ -33,7 +33,10 @@ class GraphLinkSpec(BaseModel):
 
 class GraphSliceCreateRequest(BaseModel):
     slice_name: str = Field(min_length=1, max_length=100)
-    vlan_base: int = Field(ge=100, le=3990)
+    # vlan_base es opcional: si no se especifica (o se envía null/0), el
+    # backend asigna automáticamente la siguiente VLAN libre via next_free_vlan_base().
+    # Si se especifica, se usa ese valor (permite que admins fijen una VLAN concreta).
+    vlan_base: Optional[int] = Field(default=None, ge=100, le=3990)
     vnc_start: int = Field(default=5901, ge=5901, le=65000)
     network_backend: Literal["vlan", "vxlan"] = "vlan"
     internet_mode: Literal["none", "headnode_nat", "provider_network"] = "none"

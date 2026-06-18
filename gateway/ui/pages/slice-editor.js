@@ -274,13 +274,12 @@ async function renderPropsForm(propsCard, canvas, user, role) {
   const form = h("form", {});
 
   const nameField = fieldInput("slice-name", "Nombre del slice", "text", `slice-${Date.now()}`);
-  const vlanField = fieldInput("vlan-base", "VLAN base", "number", String(100 + Math.floor(Math.random() * 1000)));
   const clusterField = fieldSelect("cluster-select", "Cluster", [
     { value: "linux", label: "Linux (KVM)" },
     { value: "openstack", label: "OpenStack" },
   ]);
 
-  form.append(nameField.wrapper, vlanField.wrapper, clusterField.wrapper);
+  form.append(nameField.wrapper, clusterField.wrapper);
 
   // ─── On-behalf-of: solo admin/profesor ──────────────────────────────
   let ownerSelect = null;
@@ -336,7 +335,6 @@ async function renderPropsForm(propsCard, canvas, user, role) {
     await handleSubmit({
       canvas,
       nameInput: nameField.input,
-      vlanInput: vlanField.input,
       clusterInput: clusterField.input,
       ownerSelect,
       courseSelect,
@@ -363,9 +361,8 @@ function fieldSelect(id, label, options) {
   return { wrapper, input };
 }
 
-async function handleSubmit({ canvas, nameInput, vlanInput, clusterInput, ownerSelect, courseSelect, submitBtn }) {
+async function handleSubmit({ canvas, nameInput, clusterInput, ownerSelect, courseSelect, submitBtn }) {
   const sliceName = nameInput.value.trim();
-  const vlanBase = parseInt(vlanInput.value, 10);
   const cluster = clusterInput.value;
 
   if (!sliceName) {
@@ -383,7 +380,7 @@ async function handleSubmit({ canvas, nameInput, vlanInput, clusterInput, ownerS
 
   const payload = {
     slice_name: sliceName,
-    vlan_base: vlanBase,
+    // vlan_base omitido → el backend asigna automáticamente la siguiente libre
     cluster,
     nodes: canvas.toPayloadNodes(),
     links: canvas.toPayloadLinks(),

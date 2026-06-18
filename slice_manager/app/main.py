@@ -25,6 +25,7 @@ from .state_store import (
     get_slice,
     list_slices,
     replace_slice,
+    next_free_vlan_base,
 )
 
 app = FastAPI(title="PUCP Slice Manager", version="0.5.0")
@@ -219,6 +220,37 @@ async def create_graph_slice(
 ):
     if any(s["slice_name"] == payload.slice_name for s in list_slices()):
         raise HTTPException(status_code=409, detail="Ya existe un slice con ese nombre")
+
+    # ─── Asignación automática de VLAN base ────────────────────────────────
+    # Si el cliente no especificó vlan_base (o mandó null), calculamos el
+    # siguiente libre. Si lo especificó (admin fijando una VLAN concreta),
+    # lo usamos tal cual pero validamos que no esté ya en uso.
+    if payload.vlan_base is None:
+        links_needed = len(payload.links)
+        try:
+            assigned_vlan = next_free_vlan_base(links_needed)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        # Parcheamos el payload con la VLAN asignada (Pydantic v2: model_copy)
+        payload = payload.model_copy(update={"vlan_base": assigned_vlan})
+    else:
+        # Validar que la VLAN manual no solape con slices existentes
+        requested_top = payload.vlan_base + len(payload.links) - 1
+        for s in list_slices():
+            existing_base = s.get("vlan_base")
+            if not existing_base:
+                continue
+            existing_links = len(s.get("links") or [])
+            existing_top = existing_base + max(existing_links - 1, 0)
+            if not (requested_top < existing_base or payload.vlan_base > existing_top):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"La VLAN base {payload.vlan_base} solapa con el slice "
+                        f"'{s['slice_name']}' (VLANs {existing_base}–{existing_top}). "
+                        "Elige otro rango o no especifiques vlan_base para asignación automática."
+                    ),
+                )
 
     owner_username, curso_id = resolve_owner_for_create(
         user, payload.owner_username, payload.curso_id
