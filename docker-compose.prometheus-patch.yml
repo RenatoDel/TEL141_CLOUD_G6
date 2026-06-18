@@ -1,0 +1,55 @@
+# ============================================================================
+# BLOQUE A AGREGAR en docker-compose.yml
+#
+# Instrucciones: agrega este bloque dentro de "services:", por ejemplo justo
+# después del bloque de "mariadb" (no importa el orden exacto, Docker Compose
+# no depende de la posición salvo por legibilidad).
+#
+# IMPORTANTE: este servicio usa network_mode: host porque necesita alcanzar
+# los puertos de los túneles SSH (127.0.0.1:9101..9103, 9122..9124) que
+# start_tunnels.sh abre directamente en el host `app`, fuera de la red
+# bridge de Docker (pucp_net). Si Prometheus estuviera en pucp_net como los
+# demás servicios, su "localhost" sería el propio contenedor, no el host, y
+# nunca vería esos túneles.
+#
+# Como contrapartida de usar network_mode: host, Prometheus no necesita (ni
+# puede) usar "ports:" — expone 9090 directamente en el host.
+# ============================================================================
+
+  # ─────────────────────────────────────────────
+  # Prometheus  (puerto 9090, monitoreo de workers)
+  # ─────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: pucp_prometheus
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.listen-address=0.0.0.0:9090"
+
+# ============================================================================
+# BLOQUE A AGREGAR en la sección "volumes:" al final del archivo
+# (junto a mariadb_data, vm_images, slice_state)
+# ============================================================================
+#   prometheus_data:
+
+# ============================================================================
+# NOTA sobre slice_manager y la variable PROMETHEUS_URL
+#
+# Como Prometheus ahora usa network_mode: host, NO está en la red pucp_net,
+# así que slice_manager no puede alcanzarlo como "http://prometheus:9090"
+# (ese nombre de servicio solo resuelve dentro de la red Docker compartida).
+#
+# En su lugar, slice_manager debe apuntar a la IP del host dentro de la red
+# Docker, que es la misma que ya usas para "controller": 172.17.0.1
+#
+# Edita tu archivo .env y cambia la línea:
+#   PROMETHEUS_URL=http://10.0.10.4:9090
+# por:
+#   PROMETHEUS_URL=http://172.17.0.1:9090
+# ============================================================================

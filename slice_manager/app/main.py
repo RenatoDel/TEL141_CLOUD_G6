@@ -92,7 +92,12 @@ async def monitoring_summary(_user=Depends(current_user)):
         except Exception:
             results[key] = {}
 
-    wanted = ["server1", "server2", "server3", "server4-headnode"]
+    # Lista real de workers monitoreados, según la topología del proyecto
+    # (ver README sección 2 y diagrama de Fase 2): 3 workers Linux + 3
+    # workers OpenStack. No existe "server4-headnode" como nodo monitoreado
+    # por separado — server4 está reservado para pruebas de placement, no
+    # forma parte del pool fijo de node_exporter.
+    wanted = ["server1", "server2", "server3", "worker1", "worker2", "worker3"]
     workers = []
     for node in wanted:
         mem_total = results["mem_total"].get(node, 0.0)
