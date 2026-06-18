@@ -103,7 +103,8 @@ TS=$(date +%s)
 SLICE_NAME="test-rbac-$TS"
 VM_A="rbacvm-${TS}-a"
 VM_B="rbacvm-${TS}-b"
-VLAN_BASE=$(( (TS % 500) + 600 ))  # rango 600-1099, fuera de lo usado normalmente
+VLAN_BASE=$(( (TS % 500) + 600 ))   # rango 600-1099
+VNC_START=$(( (TS % 200) + 5950 )) # rango 5950-6149, lejos del default 5901
 status=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
   -X POST "$GW/api/graph-slices" \
   -H "Authorization: Bearer $TOK_ALU1" \
@@ -111,6 +112,7 @@ status=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
   -d "{
     \"slice_name\":\"$SLICE_NAME\",
     \"vlan_base\":$VLAN_BASE,
+    \"vnc_start\":$VNC_START,
     \"cluster\":\"linux\",
     \"nodes\":[{\"name\":\"$VM_A\"},{\"name\":\"$VM_B\"}],
     \"links\":[{\"id\":\"l1\",\"from\":\"$VM_A\",\"to\":\"$VM_B\"}]
