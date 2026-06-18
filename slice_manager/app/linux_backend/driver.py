@@ -657,8 +657,13 @@ class LinuxDriver:
 
 
     def _build_graph_interfaces(self, slice_id: str, nodes: list[dict], links: list[dict], vlan_base: int, internet_mode: str):
-        static_pool = ipaddress.ip_network("10.200.0.0/16").subnets(new_prefix=30)
-        dhcp_pool = ipaddress.ip_network("10.201.0.0/16").subnets(new_prefix=29)
+        # Usar vlan_base como índice de partida en el pool de subnets,
+        # garantizando que cada slice empiece en una posición distinta
+        # y nunca choque con otros slices activos
+        _static_all = ipaddress.ip_network("10.200.0.0/16").subnets(new_prefix=30)
+        static_pool = (s for i, s in enumerate(_static_all) if i >= vlan_base)
+        _dhcp_all = ipaddress.ip_network("10.201.0.0/16").subnets(new_prefix=29)
+        dhcp_pool = (s for i, s in enumerate(_dhcp_all) if i >= vlan_base)
 
         node_by_name = {node["name"]: node for node in nodes}
         node_interfaces: dict[str, list[dict]] = {node["name"]: [] for node in nodes}
