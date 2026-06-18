@@ -7,7 +7,7 @@
 
 import { SliceApi } from "../lib/api.js";
 import { h, statusBadge, showError } from "../lib/components.js";
-import { getUser, getRole } from "../lib/auth.js";
+import { getUser, getRole, canWrite } from "../lib/auth.js";
 
 export async function renderDashboard(container) {
   const user = getUser();
@@ -28,11 +28,13 @@ export async function renderDashboard(container) {
           roleLabel(role)
         )
       ),
-      h(
-        "a",
-        { href: "#/slices/new", class: "btn btn-primary" },
-        "+ Nuevo slice"
-      )
+      canWrite()
+        ? h(
+            "a",
+            { href: "#/slices/new", class: "btn btn-primary" },
+            "+ Nuevo slice"
+          )
+        : null
     )
   );
 

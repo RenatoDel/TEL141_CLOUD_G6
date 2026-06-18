@@ -13,7 +13,7 @@
 import { SliceApi, AuthApi } from "../lib/api.js";
 import { TopologyCanvas } from "../lib/topology-canvas.js";
 import { h, openModal, showError, showToast } from "../lib/components.js";
-import { getUser, getRole, canActOnBehalf } from "../lib/auth.js";
+import { getUser, getRole, canActOnBehalf, canWrite } from "../lib/auth.js";
 import { navigate } from "../lib/router.js";
 
 const TEMPLATES = [
@@ -25,6 +25,11 @@ const TEMPLATES = [
 ];
 
 export async function renderSliceEditor(container) {
+  // Protección de ruta: roles read-only (coach) redirigen a /slices.
+  if (!canWrite()) {
+    navigate("/slices");
+    return;
+  }
   const user = getUser();
   const role = getRole();
 
