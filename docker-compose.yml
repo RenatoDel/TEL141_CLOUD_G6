@@ -132,6 +132,8 @@ services:
       PLACEMENT_SERVICE_URL: http://placement_service:9003
       IMAGE_SERVICE_URL: http://image_service:9004
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    volumes:
+      - ./gateway/ui:/app/ui
     depends_on:
       - auth_service
       - slice_manager
