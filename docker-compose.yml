@@ -142,6 +142,22 @@ services:
     networks:
       - pucp_net
 
+  # ─────────────────────────────────────────────
+  # Prometheus  (puerto 9090)
+  # ─────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: pucp_prometheus
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.listen-address=0.0.0.0:9090"
+
 # ─────────────────────────────────────────────
 # Volúmenes persistentes
 # ─────────────────────────────────────────────
@@ -149,6 +165,7 @@ volumes:
   mariadb_data:
   vm_images:
   slice_state:
+  prometheus_data:
 
 # ─────────────────────────────────────────────
 # Red interna
