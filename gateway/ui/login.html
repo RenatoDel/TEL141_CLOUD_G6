@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PUCP Cloud Orchestrator — Login</title>
+  <link rel="stylesheet" href="/static/styles/base.css" />
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at 30% 20%, #1b2530 0%, var(--bg) 60%);
+    }
+    .login-shell {
+      width: 380px;
+      max-width: 92vw;
+    }
+    .login-brand {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    .login-brand .brand-mark {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--accent);
+      letter-spacing: 0.08em;
+      margin-bottom: 6px;
+    }
+    .login-brand h1 {
+      font-size: 1.3rem;
+      margin: 0;
+    }
+    .login-brand .brand-tagline {
+      color: var(--text-dim);
+      font-size: 0.82rem;
+      margin-top: 6px;
+    }
+    .login-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 28px 26px;
+      box-shadow: var(--shadow-md);
+    }
+    .login-error {
+      background: var(--danger-dim);
+      color: var(--danger);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      font-size: 0.82rem;
+      margin-bottom: 14px;
+      display: none;
+    }
+    .login-error.visible { display: block; }
+    .login-submit {
+      width: 100%;
+      justify-content: center;
+      margin-top: 6px;
+    }
+    .login-demo-hint {
+      margin-top: 18px;
+      text-align: center;
+      font-size: 0.74rem;
+      color: var(--text-faint);
+    }
+  </style>
+</head>
+<body>
+  <div class="login-shell">
+    <div class="login-brand">
+      <div class="brand-mark">VLAN · KVM · OPENSTACK</div>
+      <h1>PUCP Private Cloud</h1>
+      <p class="brand-tagline">Orquestador de slices — Grupo 6</p>
+    </div>
+
+    <div class="login-card">
+      <div class="login-error" id="login-error"></div>
+      <form id="login-form">
+        <div class="field">
+          <label for="username">Usuario</label>
+          <input type="text" id="username" name="username" autocomplete="username" required autofocus />
+        </div>
+        <div class="field">
+          <label for="password">Contraseña</label>
+          <input type="password" id="password" name="password" autocomplete="current-password" required />
+        </div>
+        <button type="submit" class="btn btn-primary login-submit" id="login-submit">
+          Ingresar
+        </button>
+      </form>
+      <div class="login-demo-hint">Acceso por rol: admin · profesor · coach · alumno</div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/pages/login.js"></script>
+</body>
+</html>

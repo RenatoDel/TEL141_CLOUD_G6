@@ -1,0 +1,126 @@
+/* ============================================================================
+   topology-canvas.css — estilos del editor visual de topología
+   ========================================================================= */
+
+.topo-editor {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 16px;
+}
+
+.topo-canvas-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  position: relative;
+}
+
+.topo-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.topo-toolbar .template-select {
+  display: flex;
+  gap: 6px;
+}
+
+svg.topo-svg {
+  width: 100%;
+  height: 480px;
+  display: block;
+  background:
+    linear-gradient(var(--border) 1px, transparent 1px) 0 0 / 24px 24px,
+    linear-gradient(90deg, var(--border) 1px, transparent 1px) 0 0 / 24px 24px;
+  background-color: var(--bg);
+  cursor: crosshair;
+}
+
+.topo-link {
+  stroke: var(--border-strong);
+  stroke-width: 2;
+  cursor: pointer;
+}
+.topo-link:hover {
+  stroke: var(--danger);
+}
+
+.topo-link-delete {
+  fill: var(--surface);
+  stroke: var(--border-strong);
+  stroke-width: 1;
+  opacity: 0;
+  cursor: pointer;
+}
+.links-layer:hover .topo-link-delete {
+  opacity: 1;
+}
+
+.topo-node {
+  cursor: grab;
+}
+.topo-node-circle {
+  fill: var(--surface-raised);
+  stroke: var(--border-strong);
+  stroke-width: 2;
+  transition: stroke 0.1s, fill 0.1s;
+}
+.topo-node:hover .topo-node-circle {
+  stroke: var(--accent);
+}
+.topo-node--selected .topo-node-circle {
+  stroke: var(--accent);
+  fill: var(--accent-glow);
+  stroke-width: 3;
+}
+.topo-node-label {
+  fill: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  pointer-events: none;
+  user-select: none;
+}
+.topo-node-internet {
+  fill: var(--accent);
+  stroke: var(--surface);
+  stroke-width: 1.5;
+}
+
+.topo-help {
+  padding: 8px 14px;
+  font-size: 0.74rem;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border);
+}
+
+.topo-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.node-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  margin-bottom: 6px;
+  font-size: 0.8rem;
+}
+.node-list-item .mono {
+  color: var(--text);
+}
+
+@media (max-width: 980px) {
+  .topo-editor {
+    grid-template-columns: 1fr;
+  }
+}
