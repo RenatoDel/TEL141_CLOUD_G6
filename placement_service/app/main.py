@@ -408,23 +408,22 @@ def solve_placement(
         ram_total_int = max(int(worker.ram_total_gb * 100), 1)
         disk_total_int = max(int(worker.disk_total_gb * 100), 1)
 
-        util_j = model.new_int_var(0, SCALE * 3, f"util_{j}")
-
-        # util_int(j) = (W_CPU * Σ cpu(i)*x_ij) // cpu_total
-        #             + (W_RAM * Σ ram(i)*x_ij) // ram_total
-        #             + (W_DISK* Σ disk(i)*x_ij)// disk_total
+        max_cpu_sum = sum(int(v.cpu) for v in vms)
+        max_ram_sum = sum(int(v.ram_gb * 100) for v in vms)
+        max_disk_sum = sum(int(v.disk_gb * 100) for v in vms)
+        cpu_ub = max(1, (W_CPU * max_cpu_sum) // max(cpu_total_int, 1))
+        ram_ub = max(1, (W_RAM * max_ram_sum) // max(ram_total_int * 100, 1))
+        disk_ub = max(1, (W_DISK * max_disk_sum) // max(disk_total_int * 100, 1))
+        util_j = model.new_int_var(0, cpu_ub + ram_ub + disk_ub + 3, f"util_{j}")
         cpu_sum = sum(vms[i].cpu * x[i][j] for i in range(n_vms))
         ram_sum = sum(int(vms[i].ram_gb * 100) * x[i][j] for i in range(n_vms))
         disk_sum = sum(int(vms[i].disk_gb * 100) * x[i][j] for i in range(n_vms))
-
-        cpu_term = model.new_int_var(0, SCALE, f"cpu_term_{j}")
-        ram_term = model.new_int_var(0, SCALE, f"ram_term_{j}")
-        disk_term = model.new_int_var(0, SCALE, f"disk_term_{j}")
-
+        cpu_term = model.new_int_var(0, cpu_ub + 1, f"cpu_term_{j}")
+        ram_term = model.new_int_var(0, ram_ub + 1, f"ram_term_{j}")
+        disk_term = model.new_int_var(0, disk_ub + 1, f"disk_term_{j}")
         model.add_division_equality(cpu_term, W_CPU * cpu_sum, cpu_total_int)
         model.add_division_equality(ram_term, W_RAM * ram_sum, ram_total_int * 100)
         model.add_division_equality(disk_term, W_DISK * disk_sum, disk_total_int * 100)
-
         model.add(util_j == cpu_term + ram_term + disk_term)
         util_int.append(util_j)
 

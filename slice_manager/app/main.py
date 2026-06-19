@@ -256,7 +256,13 @@ async def create_graph_slice(
         user, payload.owner_username, payload.curso_id
     )
 
-    execution = await graph_orchestrator.create_graph_slice(payload)
+    try:
+        execution = await graph_orchestrator.create_graph_slice(payload)
+    except RuntimeError as e:
+        msg = str(e)
+        if "INFEASIBLE" in msg or "Placement" in msg:
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=500, detail=msg)
     if not execution["result"]["success"]:
         raise HTTPException(
             status_code=400,
