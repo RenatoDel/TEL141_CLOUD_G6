@@ -419,8 +419,11 @@ class LinuxDriver:
     # GRAPH MODE
     # =========================
 
-    def _graph_tap_name(self, node_name: str, iface_index: int) -> str:
-        prefix = f"tp{iface_index}-"
+    def _graph_tap_name(self, slice_id: str, node_name: str, iface_index: int) -> str:
+    # Usamos 4 chars del hash del slice_id para hacerlos únicos entre slices.
+        import hashlib
+        slice_hash = hashlib.md5(slice_id.encode()).hexdigest()[:4]
+        prefix = f"t{iface_index}{slice_hash}-"
         suffix_len = 15 - len(prefix)
         return prefix + node_name[-suffix_len:]
 
@@ -697,7 +700,7 @@ class LinuxDriver:
                 dhcp_ifname = None
 
             a_idx = iface_counter[a]
-            a_tap = self._graph_tap_name(a, a_idx)
+            a_tap = self._graph_tap_name(slice_id, a, a_idx)
             a_mac = self._stable_mac(f"{slice_id}:{a}:{link['id']}:{a_tap}")
             a_payload = {
                 "link_id": link["id"],
@@ -714,7 +717,7 @@ class LinuxDriver:
             iface_counter[a] += 1
 
             b_idx = iface_counter[b]
-            b_tap = self._graph_tap_name(b, b_idx)
+            b_tap = self._graph_tap_name(slice_id, b, b_idx)
             b_mac = self._stable_mac(f"{slice_id}:{b}:{link['id']}:{b_tap}")
             b_payload = {
                 "link_id": link["id"],

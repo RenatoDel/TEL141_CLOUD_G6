@@ -170,7 +170,7 @@ class GraphOrchestrator:
                 {
                     **node,
                     "server": worker_name,
-                    "vnc_port": payload.vnc_start + idx,
+                    "vnc_port": 5900 + payload.vlan_base + idx,
                 }
             )
 
