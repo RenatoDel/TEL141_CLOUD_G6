@@ -588,7 +588,46 @@ async def place(payload: PlacementRequest):
         solver_status=status_name,
         greedy_hint_used=greedy_used,
     )
+class ReleaseRequest(BaseModel):
+    assignments: dict[str, str]   # {vm_id: worker_name}
+    vms: list[VMSpec]
 
+
+@app.post("/release")
+def release(payload: ReleaseRequest):
+    """
+    Libera recursos en MariaDB al borrar un slice.
+    Usa valores negativos para restar lo que se reservó.
+    """
+    # Invertir signo para restar
+    neg_vms = [
+        VMSpec(
+            vm_id=v.vm_id,
+            cpu=-v.cpu,
+            ram_gb=-v.ram_gb,
+            disk_gb=-v.disk_gb,
+        )
+        for v in payload.vms
+    ]
+    try:
+        update_worker_resources(payload.assignments, neg_vms)
+        return {"success": True, "released": len(payload.vms)}
+    except Exception as exc:
+        logger.error("Error liberando recursos: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/confirm")
+def confirm(payload: ReleaseRequest):
+    """
+    Confirma reserva de recursos en MariaDB tras deploy exitoso.
+    """
+    try:
+        update_worker_resources(payload.assignments, payload.vms)
+        return {"success": True, "confirmed": len(payload.vms)}
+    except Exception as exc:
+        logger.error("Error confirmando recursos: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 # ---------------------------------------------------------------------------
 # Endpoints auxiliares

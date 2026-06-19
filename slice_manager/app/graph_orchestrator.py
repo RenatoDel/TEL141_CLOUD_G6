@@ -186,6 +186,28 @@ class GraphOrchestrator:
 
         result = self.driver.create_graph_slice(request)
 
+        # Confirmar reserva de recursos en el placement service
+        try:
+            confirm_payload = {
+                "assignments": assignments,
+                "vms": [
+                    {
+                        "vm_id": n["name"],
+                        "cpu": n.get("vcpus", 1),
+                        "ram_gb": n.get("ram_mb", 512) / 1024.0,
+                        "disk_gb": n.get("disk_gb", 4),
+                    }
+                    for n in enriched_nodes
+                ],
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.post(
+                    f"{settings.placement_service_url}/confirm",
+                    json=confirm_payload,
+                )
+        except Exception as exc:
+            logger.warning("No se pudo confirmar recursos en placement: %s", exc)
+
         return {
             "slice_name": payload.slice_name,
             "cluster": cluster,
@@ -199,13 +221,39 @@ class GraphOrchestrator:
         # Detectar cluster del slice guardado
         cluster = found.get("cluster", "linux")
         self._set_driver(cluster)
-
-        return self.driver.delete_graph_slice(
+        result = self.driver.delete_graph_slice(
             slice_id=slice_name,
             vms=found.get("vms", []),
             nat=found.get("nat"),
             dhcp=found.get("dhcp", []),
         )
+
+        # Liberar recursos en el placement service
+        try:
+            vms = found.get("vms", [])
+            workers = found.get("workers", {})
+            if vms and workers:
+                release_payload = {
+                    "assignments": workers,
+                    "vms": [
+                        {
+                            "vm_id": v["vm_id"] if "vm_id" in v else v["name"],
+                            "cpu": v.get("vcpus", 1),
+                            "ram_gb": v.get("ram_mb", 512) / 1024.0,
+                            "disk_gb": v.get("disk_gb", 4),
+                        }
+                        for v in vms
+                    ],
+                }
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.post(
+                        f"{settings.placement_service_url}/release",
+                        json=release_payload,
+                    )
+        except Exception as exc:
+            logger.warning("No se pudo liberar recursos en placement: %s", exc)
+
+        return result
 
     async def action_graph_vm(self, vm: dict, action: str) -> dict:
         # Detectar cluster de la VM
