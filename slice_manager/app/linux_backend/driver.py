@@ -986,6 +986,7 @@ class LinuxDriver:
                             interfaces=interfaces,
                             loopback_cidr=node.get("loopback_cidr"),
                             enable_ip_forward=True,
+                            slice_id=slice_id, 
                         )
                         mgr.create_vm(cfg)
                         time.sleep(3)
@@ -1039,7 +1040,7 @@ class LinuxDriver:
 
         except Exception as exc:
             logger.exception("Fallo creando graph slice %s", slice_id)
-            self._rollback_graph(created_nodes, nat_meta if nat_ready else None, dhcp_ready)
+            self._rollback_graph(created_nodes, nat_meta if nat_ready else None, dhcp_ready, slice_id=slice_id)
             return {
                 "slice_id": slice_id,
                 "success": False,
@@ -1061,7 +1062,7 @@ class LinuxDriver:
             try:
                 with self._worker_client(vm["server"]) as client:
                     taps = [iface["tap_name"] for iface in vm.get("interfaces", [])]
-                    VMManager(client).delete_vm(vm["name"], OVS_BRIDGE, taps)
+                    VMManager(client).delete_vm(vm["name"], OVS_BRIDGE, taps, slice_id=slice_id)
             except Exception as exc:
                 logger.error("Error borrando graph VM %s: %s", vm["name"], exc)
                 success = False
@@ -1113,12 +1114,12 @@ class LinuxDriver:
 
         return {"slice_id": slice_id, "success": success}
 
-    def _rollback_graph(self, created_nodes: list[dict], nat: dict | None = None, dhcp: list[dict] | None = None):
+    def _rollback_graph(self, created_nodes: list[dict], nat: dict | None = None, dhcp: list[dict] | None = None, slice_id: str = ""):
         for node in reversed(created_nodes):
             try:
                 with self._worker_client(node["server"]) as client:
                     taps = [iface["tap_name"] for iface in node.get("interfaces", [])]
-                    VMManager(client).delete_vm(node["name"], OVS_BRIDGE, taps)
+                    VMManager(client).delete_vm(node["name"], OVS_BRIDGE, taps, slice_id=slice_id)
             except Exception as exc:
                 logger.error("Rollback graph VM %s falló: %s", node["name"], exc)
 

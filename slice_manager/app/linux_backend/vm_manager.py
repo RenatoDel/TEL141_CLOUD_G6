@@ -47,6 +47,26 @@ class VMConfig:
     interfaces: list[VMInterface] = field(default_factory=list)
     loopback_cidr: str | None = None
     enable_ip_forward: bool = False
+    # slice_id: prefijo que hace únicos los paths de disco/seed/runtime
+    # por slice, permitiendo múltiples slices con VMs de mismo nombre.
+    # Default "" para compatibilidad con código legado que no lo pasa.
+    slice_id: str = ""
+
+
+def _vm_file_prefix(slice_id: str, vm_name: str) -> str:
+    """
+    Prefijo único para todos los archivos asociados a una VM específica
+    dentro de un slice concreto.
+
+    Con slice_id:  "mi-slice-abc--vm1"  → discos/seeds/pids únicos por slice.
+    Sin slice_id:  "vm1"               → comportamiento idéntico al original
+                                         (backwards compat con código legado).
+    """
+    if slice_id:
+        # Limpiar caracteres problemáticos en nombres de archivo
+        safe_slice = slice_id.replace("/", "-").replace("\\", "-")[:40]
+        return f"{safe_slice}--{vm_name}"
+    return vm_name
 
 
 class VMManager:
@@ -246,11 +266,12 @@ runcmd:
     def _create_seed_image(self, config: VMConfig, interfaces: list[VMInterface]) -> str:
         is_cirros = self._is_cirros(config)
 
-        work_dir = str(PurePosixPath(SEED_DIR) / config.name)
+        _fp = _vm_file_prefix(config.slice_id, config.name)
+        work_dir = str(PurePosixPath(SEED_DIR) / _fp)
         user_data_path = str(PurePosixPath(work_dir) / "user-data")
         meta_data_path = str(PurePosixPath(work_dir) / "meta-data")
         network_config_path = str(PurePosixPath(work_dir) / "network-config")
-        seed_img_path = str(PurePosixPath(SEED_DIR) / f"{config.name}-seed.img")
+        seed_img_path = str(PurePosixPath(SEED_DIR) / f"{_fp}-seed.img")
 
         self.ssh.sudo(f"mkdir -p {SEED_DIR}")
         self.ssh.sudo(f"rm -rf {work_dir} {seed_img_path}", raise_on_error=False)
@@ -321,8 +342,9 @@ rm -f {pid_file} {monitor} {serial_path}
 
     def create_vm(self, config: VMConfig):
         base_path = str(PurePosixPath(IMAGE_DIR) / config.base_image)
-        disk_path = str(PurePosixPath(DISK_DIR) / f"{config.name}.qcow2")
-        seed_img_path = str(PurePosixPath(SEED_DIR) / f"{config.name}-seed.img")
+        _fp = _vm_file_prefix(config.slice_id, config.name)
+        disk_path = str(PurePosixPath(DISK_DIR) / f"{_fp}.qcow2")
+        seed_img_path = str(PurePosixPath(SEED_DIR) / f"{_fp}-seed.img")
         pid_file = self._pid_file(config.name)
         monitor = self._monitor_path(config.name)
         serial_path = self._serial_path(config.name)
@@ -482,10 +504,11 @@ rm -f {pid_file} {monitor} {serial_path}
         time.sleep(1)
         return self.get_vm_status(vm_name)
 
-    def delete_vm(self, vm_name: str, ovs_bridge: str, interface_names: list[str] | None = None):
-        disk_path = str(PurePosixPath(DISK_DIR) / f"{vm_name}.qcow2")
-        seed_img_path = str(PurePosixPath(SEED_DIR) / f"{vm_name}-seed.img")
-        seed_dir = str(PurePosixPath(SEED_DIR) / vm_name)
+    def delete_vm(self, vm_name: str, ovs_bridge: str, interface_names: list[str] | None = None, slice_id: str = ""):
+        _fp = _vm_file_prefix(slice_id, vm_name)
+        disk_path = str(PurePosixPath(DISK_DIR) / f"{_fp}.qcow2")
+        seed_img_path = str(PurePosixPath(SEED_DIR) / f"{_fp}-seed.img")
+        seed_dir = str(PurePosixPath(SEED_DIR) / _fp)
         pid_file = self._pid_file(vm_name)
         monitor = self._monitor_path(vm_name)
         serial_path = self._serial_path(vm_name)
