@@ -992,7 +992,7 @@ class LinuxDriver:
                             slice_id=slice_id, 
                         )
                         mgr.create_vm(cfg)
-                        time.sleep(3)
+                        time.sleep(8)
                         status = mgr.get_vm_status(name)
                         if status != "running":
                             raise RuntimeError(f"La VM {name} no quedó running; estado={status}")
