@@ -992,8 +992,13 @@ class LinuxDriver:
                             slice_id=slice_id, 
                         )
                         mgr.create_vm(cfg)
-                        time.sleep(8)
-                        status = mgr.get_vm_status(name)
+                        # Retry hasta 15s — QEMU daemonize puede cambiar el PID
+                        status = "stopped"
+                        for _ in range(5):
+                            time.sleep(3)
+                            status = mgr.get_vm_status(name, slice_id)
+                            if status == "running":
+                                break
                         if status != "running":
                             raise RuntimeError(f"La VM {name} no quedó running; estado={status}")
 
