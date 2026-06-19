@@ -303,10 +303,11 @@ runcmd:
         return seed_img_path
 
     def _write_launcher_script(self, config: VMConfig, qemu_cmd: str):
-        launch_path = str(PurePosixPath(RUNTIME_DIR) / f"{config.name}.sh")
-        pid_file = f"/var/run/qemu-{config.name}.pid"
-        monitor = f"/var/run/qemu-{config.name}.monitor"
-        serial_path = f"/var/run/qemu-{config.name}.serial"
+        _fp = _vm_file_prefix(config.slice_id, config.name)
+        launch_path = str(PurePosixPath(RUNTIME_DIR) / f"{_fp}.sh")
+        pid_file = f"/var/run/qemu-{_fp}.pid"
+        monitor = f"/var/run/qemu-{_fp}.monitor"
+        serial_path = f"/var/run/qemu-{_fp}.serial"
 
         content = f"""#!/usr/bin/env bash
 set -e
@@ -318,20 +319,24 @@ rm -f {pid_file} {monitor} {serial_path}
         self.ssh.sudo(f"chmod 755 {launch_path}")
         return launch_path
 
-    def _pid_file(self, vm_name: str) -> str:
-        return f"/var/run/qemu-{vm_name}.pid"
+    def _pid_file(self, vm_name: str, slice_id: str = "") -> str:
+        fp = _vm_file_prefix(slice_id, vm_name)
+        return f"/var/run/qemu-{fp}.pid"
 
-    def _monitor_path(self, vm_name: str) -> str:
-        return f"/var/run/qemu-{vm_name}.monitor"
+    def _monitor_path(self, vm_name: str, slice_id: str = "") -> str:
+        fp = _vm_file_prefix(slice_id, vm_name)
+        return f"/var/run/qemu-{fp}.monitor"
 
-    def _serial_path(self, vm_name: str) -> str:
-        return f"/var/run/qemu-{vm_name}.serial"
+    def _serial_path(self, vm_name: str, slice_id: str = "") -> str:
+        fp = _vm_file_prefix(slice_id, vm_name)
+        return f"/var/run/qemu-{fp}.serial"
 
-    def _launch_path(self, vm_name: str) -> str:
-        return str(PurePosixPath(RUNTIME_DIR) / f"{vm_name}.sh")
+    def _launch_path(self, vm_name: str, slice_id: str = "") -> str:
+        fp = _vm_file_prefix(slice_id, vm_name)
+        return str(PurePosixPath(RUNTIME_DIR) / f"{fp}.sh")
 
-    def _read_pid(self, vm_name: str) -> int | None:
-        pid_file = self._pid_file(vm_name)
+    def _read_pid(self, vm_name: str, slice_id: str = "") -> int | None:
+        pid_file = self._pid_file(vm_name, slice_id)
         if not self.ssh.file_exists(pid_file):
             return None
         out, _ = self.ssh.sudo(f"cat {pid_file}", raise_on_error=False)
@@ -345,9 +350,9 @@ rm -f {pid_file} {monitor} {serial_path}
         _fp = _vm_file_prefix(config.slice_id, config.name)
         disk_path = str(PurePosixPath(DISK_DIR) / f"{_fp}.qcow2")
         seed_img_path = str(PurePosixPath(SEED_DIR) / f"{_fp}-seed.img")
-        pid_file = self._pid_file(config.name)
-        monitor = self._monitor_path(config.name)
-        serial_path = self._serial_path(config.name)
+        pid_file = self._pid_file(config.name, config.slice_id)
+        monitor = self._monitor_path(config.name, config.slice_id)
+        serial_path = self._serial_path(config.name, config.slice_id)
         vnc_disp = config.vnc_port - 5900
 
         interfaces = self._effective_interfaces(config)
@@ -432,25 +437,25 @@ rm -f {pid_file} {monitor} {serial_path}
             [iface.tap_name for iface in interfaces],
         )
 
-    def start_vm(self, vm_name: str) -> str:
-        status = self.get_vm_status(vm_name)
+    def start_vm(self, vm_name: str, slice_id: str = "") -> str:
+        status = self.get_vm_status(vm_name, slice_id)
         if status in {"running", "paused"}:
             return status
 
-        launch_path = self._launch_path(vm_name)
+        launch_path = self._launch_path(vm_name, slice_id)
         if not self.ssh.file_exists(launch_path):
             raise FileNotFoundError(f"No existe launcher para {vm_name}: {launch_path}")
 
         self.ssh.sudo(
-            f"rm -f {self._pid_file(vm_name)} {self._monitor_path(vm_name)} {self._serial_path(vm_name)}",
+            f"rm -f {self._pid_file(vm_name, slice_id)} {self._monitor_path(vm_name, slice_id)} {self._serial_path(vm_name, slice_id)}",
             raise_on_error=False,
         )
         self.ssh.sudo(f"bash {launch_path}")
         time.sleep(2)
-        return self.get_vm_status(vm_name)
+        return self.get_vm_status(vm_name, slice_id)
 
-    def stop_vm(self, vm_name: str, force: bool = True, timeout: int = 12) -> str:
-        pid = self._read_pid(vm_name)
+    def stop_vm(self, vm_name: str, force: bool = True, timeout: int = 12, slice_id: str = "") -> str:
+        pid = self._read_pid(vm_name, slice_id)
         if not pid:
             return "stopped"
 
@@ -458,7 +463,7 @@ rm -f {pid_file} {monitor} {serial_path}
 
         end = time.time() + timeout
         while time.time() < end:
-            if self.get_vm_status(vm_name) == "stopped":
+            if self.get_vm_status(vm_name, slice_id) == "stopped":
                 return "stopped"
             time.sleep(1)
 
@@ -466,53 +471,53 @@ rm -f {pid_file} {monitor} {serial_path}
             self.ssh.execute(f"sudo kill -9 {pid} 2>/dev/null || true", raise_on_error=False)
             time.sleep(1)
 
-        return self.get_vm_status(vm_name)
+        return self.get_vm_status(vm_name, slice_id)
 
-    def reboot_vm(self, vm_name: str) -> str:
-        current = self.get_vm_status(vm_name)
+    def reboot_vm(self, vm_name: str, slice_id: str = "") -> str:
+        current = self.get_vm_status(vm_name, slice_id)
         if current in {"running", "paused"}:
-            self.stop_vm(vm_name, force=True)
-        return self.start_vm(vm_name)
+            self.stop_vm(vm_name, force=True, slice_id=slice_id)
+        return self.start_vm(vm_name, slice_id)
 
-    def pause_vm(self, vm_name: str) -> str:
-        status = self.get_vm_status(vm_name)
+    def pause_vm(self, vm_name: str, slice_id: str = "") -> str:
+        status = self.get_vm_status(vm_name, slice_id)
         if status == "paused":
             return status
         if status != "running":
             return status
 
-        pid = self._read_pid(vm_name)
+        pid = self._read_pid(vm_name, slice_id)
         if not pid:
             return "stopped"
 
         self.ssh.execute(f"sudo kill -STOP {pid} 2>/dev/null || true", raise_on_error=False)
         time.sleep(1)
-        return self.get_vm_status(vm_name)
+        return self.get_vm_status(vm_name, slice_id)
 
-    def resume_vm(self, vm_name: str) -> str:
-        status = self.get_vm_status(vm_name)
+    def resume_vm(self, vm_name: str, slice_id: str = "") -> str:
+        status = self.get_vm_status(vm_name, slice_id)
         if status == "running":
             return status
         if status != "paused":
             return status
 
-        pid = self._read_pid(vm_name)
+        pid = self._read_pid(vm_name, slice_id)
         if not pid:
             return "stopped"
 
         self.ssh.execute(f"sudo kill -CONT {pid} 2>/dev/null || true", raise_on_error=False)
         time.sleep(1)
-        return self.get_vm_status(vm_name)
+        return self.get_vm_status(vm_name, slice_id)
 
     def delete_vm(self, vm_name: str, ovs_bridge: str, interface_names: list[str] | None = None, slice_id: str = ""):
         _fp = _vm_file_prefix(slice_id, vm_name)
         disk_path = str(PurePosixPath(DISK_DIR) / f"{_fp}.qcow2")
         seed_img_path = str(PurePosixPath(SEED_DIR) / f"{_fp}-seed.img")
         seed_dir = str(PurePosixPath(SEED_DIR) / _fp)
-        pid_file = self._pid_file(vm_name)
-        monitor = self._monitor_path(vm_name)
-        serial_path = self._serial_path(vm_name)
-        launch_path = self._launch_path(vm_name)
+        pid_file = self._pid_file(vm_name, slice_id)
+        monitor = self._monitor_path(vm_name, slice_id)
+        serial_path = self._serial_path(vm_name, slice_id)
+        launch_path = self._launch_path(vm_name, slice_id)
 
         if self.ssh.file_exists(pid_file):
             pid_out, _ = self.ssh.sudo(f"cat {pid_file}", raise_on_error=False)
@@ -548,8 +553,8 @@ rm -f {pid_file} {monitor} {serial_path}
         self.ssh.sudo(f"rm -f {seed_img_path}", raise_on_error=False)
         self.ssh.sudo(f"rm -rf {seed_dir}", raise_on_error=False)
 
-    def get_vm_status(self, vm_name: str) -> str:
-        pid = self._read_pid(vm_name)
+    def get_vm_status(self, vm_name: str, slice_id: str = "") -> str:
+        pid = self._read_pid(vm_name, slice_id)
         if not pid:
             return "stopped"
 
