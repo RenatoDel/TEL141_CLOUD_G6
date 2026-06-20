@@ -402,6 +402,7 @@ def solve_placement(
         )
 
     # --- util_int(j): utilización normalizada ×SCALE por worker ---
+    # --- util_int(j): utilización normalizada ×SCALE por worker ---
     util_int = []
     for j, worker in enumerate(workers):
         cpu_total_int = max(worker.cpu_total, 1)
@@ -412,14 +413,27 @@ def solve_placement(
         ram_sum = sum(int(vms[i].ram_gb * 100) * x[i][j] for i in range(n_vms))
         disk_sum = sum(int(vms[i].disk_gb * 100) * x[i][j] for i in range(n_vms))
 
-        # Bounds fijos: cada término es una fracción de SCALE, nunca lo excede
+        # OR-Tools 9.10 no acepta una expresión directa como numerador en
+        # add_division_equality ("expression must be affine"). Se requiere
+        # una variable intermedia ligada con model.add() antes de dividir.
+        max_cpu_num = W_CPU * sum(int(v.cpu) for v in vms)
+        max_ram_num = W_RAM * sum(int(v.ram_gb * 100) for v in vms)
+        max_disk_num = W_DISK * sum(int(v.disk_gb * 100) for v in vms)
+
+        cpu_num = model.new_int_var(0, max_cpu_num, f"cpu_num_{j}")
+        ram_num = model.new_int_var(0, max_ram_num, f"ram_num_{j}")
+        disk_num = model.new_int_var(0, max_disk_num, f"disk_num_{j}")
+        model.add(cpu_num == W_CPU * cpu_sum)
+        model.add(ram_num == W_RAM * ram_sum)
+        model.add(disk_num == W_DISK * disk_sum)
+
         cpu_term = model.new_int_var(0, SCALE, f"cpu_term_{j}")
         ram_term = model.new_int_var(0, SCALE, f"ram_term_{j}")
         disk_term = model.new_int_var(0, SCALE, f"disk_term_{j}")
 
-        model.add_division_equality(cpu_term, W_CPU * cpu_sum, cpu_total_int)
-        model.add_division_equality(ram_term, W_RAM * ram_sum, ram_total_int * 100)
-        model.add_division_equality(disk_term, W_DISK * disk_sum, disk_total_int * 100)
+        model.add_division_equality(cpu_term, cpu_num, cpu_total_int)
+        model.add_division_equality(ram_term, ram_num, ram_total_int * 100)
+        model.add_division_equality(disk_term, disk_num, disk_total_int * 100)
 
         util_j = model.new_int_var(0, SCALE * 3, f"util_{j}")
         model.add(util_j == cpu_term + ram_term + disk_term)
