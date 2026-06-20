@@ -189,9 +189,7 @@ async def get_prometheus_usage(worker_names: list[str]) -> dict[str, dict[str, f
     """
     Consulta Prometheus para obtener avg_cpu_uso, avg_ram_uso, std_cpu_uso y
     std_ram_uso de los últimos PROMETHEUS_WINDOW minutos.
-    Devuelve {worker_name: {avg_cpu, avg_ram, std_cpu, std_ram}}.
-    Si Prometheus no responde, fallback a OC_FALLBACK para avg y 0.0 para std
-    (sin historia confiable, no se penaliza por volatilidad).
+
     """
     result: dict[str, dict[str, float]] = {
         name: {"avg_cpu": OC_FALLBACK, "avg_ram": OC_FALLBACK, "std_cpu": 0.0, "std_ram": 0.0}
@@ -202,23 +200,23 @@ async def get_prometheus_usage(worker_names: list[str]) -> dict[str, dict[str, f
         async with httpx.AsyncClient(timeout=5.0) as client:
             for worker_name in worker_names:
                 cpu_avg_query = (
-                    f'avg_over_time(rate(node_cpu_seconds_total'
-                    f'{{instance="{worker_name}",mode!="idle"}}[1m])[{PROMETHEUS_WINDOW}:1m])'
+                    f'1 - avg(avg_over_time(rate(node_cpu_seconds_total'
+                    f'{{node="{worker_name}",mode="idle"}}[1m])[{PROMETHEUS_WINDOW}:1m]))'
                 )
                 ram_avg_query = (
                     f'1 - avg_over_time('
-                    f'(node_memory_MemAvailable_bytes{{instance="{worker_name}"}}'
-                    f' / node_memory_MemTotal_bytes{{instance="{worker_name}"}})'
+                    f'(node_memory_MemAvailable_bytes{{node="{worker_name}"}}'
+                    f' / node_memory_MemTotal_bytes{{node="{worker_name}"}})'
                     f'[{PROMETHEUS_WINDOW}:1m])'
                 )
                 cpu_std_query = (
-                    f'stddev_over_time(rate(node_cpu_seconds_total'
-                    f'{{instance="{worker_name}",mode!="idle"}}[1m])[{PROMETHEUS_WINDOW}:1m])'
+                    f'stddev(avg_over_time(rate(node_cpu_seconds_total'
+                    f'{{node="{worker_name}",mode="idle"}}[1m])[{PROMETHEUS_WINDOW}:1m]))'
                 )
                 ram_std_query = (
                     f'stddev_over_time('
-                    f'(1 - node_memory_MemAvailable_bytes{{instance="{worker_name}"}}'
-                    f' / node_memory_MemTotal_bytes{{instance="{worker_name}"}})'
+                    f'(1 - node_memory_MemAvailable_bytes{{node="{worker_name}"}}'
+                    f' / node_memory_MemTotal_bytes{{node="{worker_name}"}})'
                     f'[{PROMETHEUS_WINDOW}:1m])'
                 )
 
@@ -238,11 +236,8 @@ async def get_prometheus_usage(worker_names: list[str]) -> dict[str, dict[str, f
                     if data.get("status") == "success" and data["data"]["result"]:
                         value = float(data["data"]["result"][0]["value"][1])
                         if metric.startswith("avg"):
-                            # Clamp entre 0.01 y 1.0 para evitar división por cero
                             result[worker_name][metric] = max(0.01, min(1.0, value))
                         else:
-                            # std no se clampea a 1.0 — un worker muy errático
-                            # puede tener stddev alto, eso es justamente la señal
                             result[worker_name][metric] = max(0.0, value)
 
     except Exception as exc:
