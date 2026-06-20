@@ -36,6 +36,7 @@ OC_FALLBACK: float = float(os.getenv("OC_FALLBACK", "1.0"))
 MAX_TIME_SOLVER: float = float(os.getenv("MAX_TIME_SOLVER", "0.5"))
 PROMETHEUS_WINDOW: str = os.getenv("PROMETHEUS_WINDOW", "10m")
 PROMETHEUS_URL: str = os.getenv("PROMETHEUS_URL", "http://10.0.10.4:9090")
+RISK_FACTOR_K: float = float(os.getenv("RISK_FACTOR_K", "1.0"))
 
 # MariaDB
 DB_HOST: str = os.getenv("DB_HOST", "mariadb")
@@ -186,32 +187,49 @@ def update_worker_resources(assignments: dict[str, str], vms: list[VMSpec], conn
 
 async def get_prometheus_usage(worker_names: list[str]) -> dict[str, dict[str, float]]:
     """
-    Consulta Prometheus para obtener avg_cpu_uso y avg_ram_uso
-    de los últimos PROMETHEUS_WINDOW minutos.
-    Devuelve {worker_name: {avg_cpu: float, avg_ram: float}}.
-    Si Prometheus no responde, fallback a OC_FALLBACK.
+    Consulta Prometheus para obtener avg_cpu_uso, avg_ram_uso, std_cpu_uso y
+    std_ram_uso de los últimos PROMETHEUS_WINDOW minutos.
+    Devuelve {worker_name: {avg_cpu, avg_ram, std_cpu, std_ram}}.
+    Si Prometheus no responde, fallback a OC_FALLBACK para avg y 0.0 para std
+    (sin historia confiable, no se penaliza por volatilidad).
     """
     result: dict[str, dict[str, float]] = {
-        name: {"avg_cpu": OC_FALLBACK, "avg_ram": OC_FALLBACK}
+        name: {"avg_cpu": OC_FALLBACK, "avg_ram": OC_FALLBACK, "std_cpu": 0.0, "std_ram": 0.0}
         for name in worker_names
     }
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             for worker_name in worker_names:
-                # CPU — promedio de uso en ventana de tiempo
-                cpu_query = (
+                cpu_avg_query = (
                     f'avg_over_time(rate(node_cpu_seconds_total'
                     f'{{instance="{worker_name}",mode!="idle"}}[1m])[{PROMETHEUS_WINDOW}:1m])'
                 )
-                # RAM — (total - available) / total
-                ram_query = (
+                ram_avg_query = (
                     f'1 - avg_over_time('
                     f'(node_memory_MemAvailable_bytes{{instance="{worker_name}"}}'
                     f' / node_memory_MemTotal_bytes{{instance="{worker_name}"}})'
                     f'[{PROMETHEUS_WINDOW}:1m])'
                 )
-                for metric, query in [("avg_cpu", cpu_query), ("avg_ram", ram_query)]:
+                cpu_std_query = (
+                    f'stddev_over_time(rate(node_cpu_seconds_total'
+                    f'{{instance="{worker_name}",mode!="idle"}}[1m])[{PROMETHEUS_WINDOW}:1m])'
+                )
+                ram_std_query = (
+                    f'stddev_over_time('
+                    f'(1 - node_memory_MemAvailable_bytes{{instance="{worker_name}"}}'
+                    f' / node_memory_MemTotal_bytes{{instance="{worker_name}"}})'
+                    f'[{PROMETHEUS_WINDOW}:1m])'
+                )
+
+                queries = [
+                    ("avg_cpu", cpu_avg_query),
+                    ("avg_ram", ram_avg_query),
+                    ("std_cpu", cpu_std_query),
+                    ("std_ram", ram_std_query),
+                ]
+
+                for metric, query in queries:
                     resp = await client.get(
                         f"{PROMETHEUS_URL}/api/v1/query",
                         params={"query": query},
@@ -219,11 +237,16 @@ async def get_prometheus_usage(worker_names: list[str]) -> dict[str, dict[str, f
                     data = resp.json()
                     if data.get("status") == "success" and data["data"]["result"]:
                         value = float(data["data"]["result"][0]["value"][1])
-                        # Clamp entre 0.01 y 1.0 para evitar división por cero
-                        result[worker_name][metric] = max(0.01, min(1.0, value))
+                        if metric.startswith("avg"):
+                            # Clamp entre 0.01 y 1.0 para evitar división por cero
+                            result[worker_name][metric] = max(0.01, min(1.0, value))
+                        else:
+                            # std no se clampea a 1.0 — un worker muy errático
+                            # puede tener stddev alto, eso es justamente la señal
+                            result[worker_name][metric] = max(0.0, value)
 
     except Exception as exc:
-        logger.warning("Prometheus no disponible, usando fallback ratio=1.0: %s", exc)
+        logger.warning("Prometheus no disponible, usando fallback ratio=1.0 sin penalización de varianza: %s", exc)
 
     return result
 
@@ -238,8 +261,13 @@ def compute_effective_capacities(
     """
     Calcula cap_cpu, cap_ram_gb, cap_disk_gb para un worker.
 
-    En t=0 (sin compromisos): ratio=1.0, sin overcommit.
-    En t>0: ratio dinámico basado en Prometheus.
+    El overcommit se ajusta por un estimador conservador de uso esperado:
+    avg + k*std, no solo el promedio. Dos workers con la misma media pero
+    distinta volatilidad reciben overcommit distinto — el más errático
+    queda más limitado (ver sección 4.5 de Solucion_VM_Placement_v5.docx).
+
+    En t=0 (sin compromisos ni historia): avg≈SO base (2-8%), std≈0,
+    el sistema se comporta igual que sin este ajuste.
     """
     cpu_libre = worker["vcpus_total"] - worker["vcpus_used"]
     ram_libre_gb = (worker["ram_total_mb"] - worker["ram_used_mb"]) / 1024.0
@@ -247,13 +275,16 @@ def compute_effective_capacities(
 
     avg_cpu = prom.get("avg_cpu", OC_FALLBACK)
     avg_ram = prom.get("avg_ram", OC_FALLBACK)
+    std_cpu = prom.get("std_cpu", 0.0)
+    std_ram = prom.get("std_ram", 0.0)
 
-    # Si no hay historia (avg muy bajo), no aplicar overcommit
-    ratio_cpu = min(MAX_OC_CPU, 1.0 / avg_cpu) if avg_cpu > 0.01 else 1.0
-    ratio_ram = min(MAX_OC_RAM, 1.0 / avg_ram) if avg_ram > 0.01 else 1.0
+    # Estimador conservador: media + k desviaciones estándar
+    uso_estimado_cpu = avg_cpu + RISK_FACTOR_K * std_cpu
+    uso_estimado_ram = avg_ram + RISK_FACTOR_K * std_ram
 
-    # En t=0 (nada comprometido), ratio queda en 1.0 naturalmente
-    # porque avg_cpu del SO base es típicamente 0.02-0.08
+    ratio_cpu = min(MAX_OC_CPU, 1.0 / uso_estimado_cpu) if uso_estimado_cpu > 0.01 else 1.0
+    ratio_ram = min(MAX_OC_RAM, 1.0 / uso_estimado_ram) if uso_estimado_ram > 0.01 else 1.0
+
     cap_cpu = cpu_libre * ratio_cpu
     cap_ram_gb = ram_libre_gb * ratio_ram
     cap_disk_gb = disk_libre_gb  # disco: Opción A, siempre exacto sin overcommit
@@ -680,6 +711,8 @@ async def workers_status(zone: Optional[str] = None):
             "disk_used_gb": w["storage_used_gb"],
             "avg_cpu_uso": round(prom_data.get(w["nombre"], {}).get("avg_cpu", 0), 3),
             "avg_ram_uso": round(prom_data.get(w["nombre"], {}).get("avg_ram", 0), 3),
+            "std_cpu_uso": round(prom_data.get(w["nombre"], {}).get("std_cpu", 0), 3),
+            "std_ram_uso": round(prom_data.get(w["nombre"], {}).get("std_ram", 0), 3),
             "cap_cpu_efectiva": round(cap_cpu, 2),
             "cap_ram_gb_efectiva": round(cap_ram_gb, 2),
             "cap_disk_gb_efectiva": round(cap_disk_gb, 2),
