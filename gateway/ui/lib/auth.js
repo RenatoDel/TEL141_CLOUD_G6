@@ -93,14 +93,14 @@ export function isAlumno() {
   return hasRole("alumno");
 }
 
-/** Roles que NO pueden mutar nada (solo lectura) — hoy: coach. */
+/** Roles que NO pueden mutar nada (solo lectura): coach y alumno. */
 export function isReadOnly() {
-  return isCoach();
+  return isCoach() || isAlumno();
 }
 
-/** Roles que pueden crear/editar/borrar (todo menos coach). */
+/** Roles que pueden crear/editar/borrar slices: admin y profesor. */
 export function canWrite() {
-  return !isReadOnly();
+  return hasRole("admin", "profesor");
 }
 
 /** Roles que pueden crear slices "on behalf of" otro usuario. */

@@ -22,17 +22,17 @@
 
 const NODE_RADIUS = 28;
 
-let nodeIdCounter = 0;
-let linkIdCounter = 0;
-
-function nextNodeName() {
-  nodeIdCounter += 1;
-  return `vm${nodeIdCounter}`;
+function _nextFreeName(existingNames) {
+  // Genera vm1, vm2, ... saltándose los nombres que ya existen.
+  let n = 1;
+  while (existingNames.has(`vm${n}`)) n += 1;
+  return `vm${n}`;
 }
 
-function nextLinkId() {
-  linkIdCounter += 1;
-  return `link${linkIdCounter}`;
+function _nextLinkId(existingIds) {
+  let n = 1;
+  while (existingIds.has(`link${n}`)) n += 1;
+  return `link${n}`;
 }
 
 export class TopologyCanvas {
@@ -48,6 +48,14 @@ export class TopologyCanvas {
     this.dragState = null;
 
     this._setupSvg();
+  }
+
+  _nextNodeName() {
+    return _nextFreeName(new Set(this.nodes.map((n) => n.name)));
+  }
+
+  _nextLinkId() {
+    return _nextLinkId(new Set(this.links.map((l) => l.id)));
   }
 
   _setupSvg() {
@@ -83,14 +91,12 @@ export class TopologyCanvas {
   clear() {
     this.nodes = [];
     this.links = [];
-    nodeIdCounter = 0;
-    linkIdCounter = 0;
     this._render();
   }
 
   addNode(x, y, overrides = {}) {
     const node = {
-      name: nextNodeName(),
+      name: this._nextNodeName(),
       x,
       y,
       vcpus: 1,
@@ -101,6 +107,11 @@ export class TopologyCanvas {
       preferred_worker: null,
       ...overrides,
     };
+    // Si el overrides trae un name que ya existe, lo sustituimos por el
+    // siguiente libre para mantener invariante de unicidad.
+    if (overrides.name && this.nodes.some((n) => n.name === overrides.name)) {
+      node.name = this._nextNodeName();
+    }
     this.nodes.push(node);
     this._render();
     this.onChange();
@@ -123,7 +134,7 @@ export class TopologyCanvas {
         (l.from_node === toName && l.to_node === fromName)
     );
     if (exists) return null;
-    const link = { id: nextLinkId(), from_node: fromName, to_node: toName };
+    const link = { id: this._nextLinkId(), from_node: fromName, to_node: toName };
     this.links.push(link);
     this._render();
     this.onChange();
@@ -183,9 +194,10 @@ export class TopologyCanvas {
         x: cx + r * Math.cos(angle),
         y: cy + r * Math.sin(angle),
       });
-      const num = parseInt((node.name.match(/\d+/) || [0])[0], 10);
-      if (num >= nodeIdCounter) nodeIdCounter = num;
     });
+    // Los contadores ahora se calculan a partir de this.nodes/links, así
+    // que cargar un grafo existente ya basta para que el siguiente nombre
+    // libre se obtenga correctamente sin tocar estado global.
     links.forEach((link) => {
       this.links.push({
         id: link.id,
@@ -199,11 +211,32 @@ export class TopologyCanvas {
 
   // ════════════════════════════════════════════════════════════════════
   // Templates predefinidos (cumplen rúbrica R1B: lineal, malla, árbol,
-  // anillo, bus)
+  // anillo, bus). Dos APIs:
+  //
+  //   loadTemplate(kind, count)   → limpia el canvas y aplica el template
+  //                                  (uso clásico: empezar un slice nuevo)
+  //   appendTemplate(kind, count) → AGREGA el template sobre lo que ya hay
+  //                                  (uso compuesto: anillo + lineal en
+  //                                  el mismo slice). Auto-renombra nodos
+  //                                  para no colisionar con los existentes.
+  //
+  // El template se posiciona en un offset vertical distinto si el canvas
+  // ya tiene nodos, para que quede visualmente separado.
   // ════════════════════════════════════════════════════════════════════
   loadTemplate(kind, count = 4) {
     this.clear();
-    const cx = 400, cy = 230;
+    this.appendTemplate(kind, count);
+  }
+
+  appendTemplate(kind, count = 4) {
+    // Si ya hay nodos, desplazamos el nuevo subgrafo verticalmente para
+    // que no se superponga con lo existente.
+    const offsetY = this.nodes.length > 0
+      ? Math.max(...this.nodes.map((n) => n.y)) + 120
+      : 0;
+    const cx = 400;
+    const cy = 230 + offsetY;
+    const startIdx = this.nodes.length;  // primer nodo nuevo (para enlazar)
 
     if (kind === "linear") {
       const spacing = 600 / Math.max(count - 1, 1);
@@ -211,7 +244,7 @@ export class TopologyCanvas {
         this.addNode(100 + i * spacing, cy);
       }
       for (let i = 0; i < count - 1; i++) {
-        this.addLink(this.nodes[i].name, this.nodes[i + 1].name);
+        this.addLink(this.nodes[startIdx + i].name, this.nodes[startIdx + i + 1].name);
       }
     } else if (kind === "ring") {
       const r = Math.min(180, 60 + count * 12);
@@ -220,7 +253,10 @@ export class TopologyCanvas {
         this.addNode(cx + r * Math.cos(angle), cy + r * Math.sin(angle));
       }
       for (let i = 0; i < count; i++) {
-        this.addLink(this.nodes[i].name, this.nodes[(i + 1) % count].name);
+        this.addLink(
+          this.nodes[startIdx + i].name,
+          this.nodes[startIdx + ((i + 1) % count)].name
+        );
       }
     } else if (kind === "mesh") {
       const r = Math.min(170, 60 + count * 12);
@@ -230,7 +266,7 @@ export class TopologyCanvas {
       }
       for (let i = 0; i < count; i++) {
         for (let j = i + 1; j < count; j++) {
-          this.addLink(this.nodes[i].name, this.nodes[j].name);
+          this.addLink(this.nodes[startIdx + i].name, this.nodes[startIdx + j].name);
         }
       }
     } else if (kind === "tree") {
@@ -240,7 +276,7 @@ export class TopologyCanvas {
       let placed = 0;
       for (let level = 0; level < levels && placed < count; level++) {
         const nodesInLevel = Math.min(2 ** level, count - placed);
-        const y = 70 + level * (340 / Math.max(levels - 1, 1));
+        const y = (70 + offsetY) + level * (340 / Math.max(levels - 1, 1));
         const spacing = 700 / (nodesInLevel + 1);
         for (let i = 0; i < nodesInLevel; i++) {
           positions.push({ x: 50 + spacing * (i + 1), y });
@@ -248,21 +284,21 @@ export class TopologyCanvas {
         }
       }
       positions.forEach((p) => this.addNode(p.x, p.y));
-      for (let i = 1; i < this.nodes.length; i++) {
+      for (let i = 1; i < count; i++) {
         const parentIdx = Math.floor((i - 1) / 2);
-        this.addLink(this.nodes[parentIdx].name, this.nodes[i].name);
+        this.addLink(this.nodes[startIdx + parentIdx].name, this.nodes[startIdx + i].name);
       }
     } else if (kind === "bus") {
-      // Un nodo "bus" central (primer nodo) conectado a todos los demás,
-      // representando el segmento compartido.
-      this.addNode(cx, 90, { name: nextNodeName() });
-      const busName = this.nodes[0].name;
+      // Un nodo "bus" central (primer nodo del subgrafo) conectado a todos
+      // los demás, representando el segmento compartido.
+      this.addNode(cx, 90 + offsetY);
+      const busName = this.nodes[startIdx].name;
       const spacing = 600 / Math.max(count - 1, 1);
       for (let i = 0; i < count - 1; i++) {
-        this.addNode(100 + i * spacing, 340);
+        this.addNode(100 + i * spacing, 340 + offsetY);
       }
-      for (let i = 1; i < this.nodes.length; i++) {
-        this.addLink(busName, this.nodes[i].name);
+      for (let i = 1; i < count; i++) {
+        this.addLink(busName, this.nodes[startIdx + i].name);
       }
     }
   }

@@ -31,6 +31,7 @@ from jose import JWTError
 
 from .db import get_conn
 from .models import (
+    CoachAssignmentRequest,
     CursoCreateRequest,
     CursoPublic,
     CursoUpdateRequest,
@@ -89,7 +90,8 @@ def _course_ids_for_user(cur, user_id: int, rol: str) -> list[int]:
     Devuelve los IDs de cursos que aplican según el rol:
       - alumno   → cursos en los que está inscrito
       - profesor → cursos que dicta
-      - admin/coach → []  (acceso transversal, no se filtra por curso)
+      - coach    → cursos que audita (M:N en curso_coach)
+      - admin    → []  (acceso transversal, no se filtra por curso)
     """
     if rol == "alumno":
         cur.execute(
@@ -103,6 +105,14 @@ def _course_ids_for_user(cur, user_id: int, rol: str) -> list[int]:
             (user_id,),
         )
         return [r["id"] for r in cur.fetchall()]
+    if rol == "coach":
+        cur.execute(
+            "SELECT cc.curso_id FROM curso_coach cc "
+            "JOIN curso c ON c.id = cc.curso_id "
+            "WHERE cc.coach_id=%s AND c.activo=1",
+            (user_id,),
+        )
+        return [r["curso_id"] for r in cur.fetchall()]
     return []
 
 
@@ -313,6 +323,14 @@ def _curso_to_public(cur, row: dict) -> CursoPublic:
     )
     alumnos = [r["username"] for r in cur.fetchall()]
 
+    cur.execute(
+        "SELECT u.username FROM curso_coach cc "
+        "JOIN usuario u ON u.id = cc.coach_id "
+        "WHERE cc.curso_id=%s ORDER BY u.username",
+        (row["id"],),
+    )
+    coaches = [r["username"] for r in cur.fetchall()]
+
     return CursoPublic(
         id=row["id"],
         codigo=row["codigo"],
@@ -322,6 +340,7 @@ def _curso_to_public(cur, row: dict) -> CursoPublic:
         periodo=row["periodo"],
         activo=bool(row["activo"]),
         alumnos=alumnos,
+        coaches=coaches,
     )
 
 
@@ -348,14 +367,15 @@ def _check_profesor_owns_curso(user: dict, curso_row: dict):
 @app.get("/courses", response_model=list[CursoPublic])
 def list_courses(user: dict = Depends(current_user)):
     """
-    - admin/coach: ven todos los cursos activos
-    - profesor: ven los que dictan
-    - alumno: ven los que cursan
+    - admin: ve todos los cursos activos
+    - profesor: ve los que dicta
+    - coach: ve los que audita (asignados vía curso_coach)
+    - alumno: ve los que cursa
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
             role = user["role"]
-            if role in ("admin", "coach"):
+            if role == "admin":
                 cur.execute(
                     "SELECT id, codigo, nombre, profesor_id, periodo, activo "
                     "FROM curso WHERE activo=1 ORDER BY codigo"
@@ -364,6 +384,13 @@ def list_courses(user: dict = Depends(current_user)):
                 cur.execute(
                     "SELECT id, codigo, nombre, profesor_id, periodo, activo "
                     "FROM curso WHERE profesor_id=%s AND activo=1 ORDER BY codigo",
+                    (user["uid"],),
+                )
+            elif role == "coach":
+                cur.execute(
+                    "SELECT c.id, c.codigo, c.nombre, c.profesor_id, c.periodo, c.activo "
+                    "FROM curso c JOIN curso_coach cc ON cc.curso_id=c.id "
+                    "WHERE cc.coach_id=%s AND c.activo=1 ORDER BY c.codigo",
                     (user["uid"],),
                 )
             else:  # alumno
@@ -553,3 +580,104 @@ def unenroll_student(
                 "DELETE FROM curso_alumno WHERE curso_id=%s AND alumno_id=%s",
                 (row["id"], u["id"]),
             )
+
+# ════════════════════════════════════════════════════════════════════════════
+# Asignación de coaches a cursos (M:N)
+# ════════════════════════════════════════════════════════════════════════════
+@app.post("/courses/{codigo}/coaches", response_model=CursoPublic)
+def assign_coaches(
+    codigo: str,
+    payload: CoachAssignmentRequest,
+    _admin=Depends(require_role("admin")),
+):
+    """Asigna uno o más coaches a un curso. Solo admin."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            row = _curso_by_codigo(cur, codigo)
+            if not row:
+                raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+            not_found, not_coach = [], []
+            for username in payload.coach_usernames:
+                u = _user_by_username(cur, username)
+                if not u:
+                    not_found.append(username)
+                    continue
+                if u["rol"] != "coach":
+                    not_coach.append(username)
+                    continue
+                cur.execute(
+                    "INSERT IGNORE INTO curso_coach (curso_id, coach_id) VALUES (%s, %s)",
+                    (row["id"], u["id"]),
+                )
+
+            if not_found or not_coach:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "no_encontrados": not_found,
+                        "no_son_coach": not_coach,
+                    },
+                )
+
+            return _curso_to_public(cur, row)
+
+
+@app.delete("/courses/{codigo}/coaches/{username}", status_code=204)
+def remove_coach(
+    codigo: str,
+    username: str,
+    _admin=Depends(require_role("admin")),
+):
+    """Quita un coach de un curso. Solo admin."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            row = _curso_by_codigo(cur, codigo)
+            if not row:
+                raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+            u = _user_by_username(cur, username)
+            if not u:
+                raise HTTPException(status_code=404, detail="Coach no encontrado")
+
+            cur.execute(
+                "DELETE FROM curso_coach WHERE curso_id=%s AND coach_id=%s",
+                (row["id"], u["id"]),
+            )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Listados públicos para flujos de UI (no requieren ser admin)
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/students-listable", response_model=list[UserPublic])
+def list_students_for_enrollment(user: dict = Depends(current_user)):
+    """
+    Lista de alumnos disponibles para flujos como "inscribir alumno en curso"
+    o "crear slice on behalf of alumno". Visible para admin y profesor.
+
+    Existe porque GET /users es admin-only y bloqueaba al profesor.
+    """
+    if user["role"] not in ("admin", "profesor"):
+        raise HTTPException(status_code=403, detail="Acción no permitida para tu rol")
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, username, email, rol, activo "
+                "FROM usuario WHERE rol='alumno' AND activo=1 ORDER BY username"
+            )
+            rows = cur.fetchall()
+            return [_user_to_public(cur, r) for r in rows]
+
+
+@app.get("/coaches-listable", response_model=list[UserPublic])
+def list_coaches_for_assignment(_admin=Depends(require_role("admin"))):
+    """Lista de coaches disponibles para asignar a un curso. Solo admin."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, username, email, rol, activo "
+                "FROM usuario WHERE rol='coach' AND activo=1 ORDER BY username"
+            )
+            rows = cur.fetchall()
+            return [_user_to_public(cur, r) for r in rows]

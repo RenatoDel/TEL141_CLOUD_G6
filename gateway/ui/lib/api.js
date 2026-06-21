@@ -108,6 +108,22 @@ export const AuthApi = {
       `/auth/courses/${encodeURIComponent(codigo)}/members/${encodeURIComponent(username)}`,
       { method: "DELETE" }
     ),
+
+  // ── Coaches (M:N curso ↔ coach, admin-only para asignar) ─────────────
+  assignCoaches: (codigo, coachUsernames) =>
+    request(`/auth/courses/${encodeURIComponent(codigo)}/coaches`, {
+      method: "POST",
+      body: { coach_usernames: coachUsernames },
+    }),
+  removeCoach: (codigo, username) =>
+    request(
+      `/auth/courses/${encodeURIComponent(codigo)}/coaches/${encodeURIComponent(username)}`,
+      { method: "DELETE" }
+    ),
+
+  // ── Listados públicos (no requieren admin) ───────────────────────────
+  listStudents: () => request("/auth/students-listable"),
+  listCoaches: () => request("/auth/coaches-listable"),
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -131,6 +147,9 @@ export const SliceApi = {
     ),
 
   monitoringSummary: () => request("/api/monitoring/summary"),
+
+  /** Resumen por curso (para profesor/coach) — slices visibles agrupados. */
+  monitoringCoursesSummary: () => request("/api/monitoring/courses-summary"),
 };
 
 /**

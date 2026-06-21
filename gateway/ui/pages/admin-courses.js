@@ -80,6 +80,7 @@ function renderCourseCard(course, container) {
       { style: "font-size:0.78rem;color:var(--text-dim);margin-bottom:10px" },
       `Profesor: ${course.profesor_username || "—"}`
     ),
+    // ─── Alumnos ───────────────────────────────────────────────────
     h(
       "div",
       { style: "font-size:0.78rem;margin-bottom:12px" },
@@ -91,13 +92,13 @@ function renderCourseCard(course, container) {
             ...course.alumnos.map((a) =>
               h(
                 "span",
-                { class: "badge badge--neutral", style: "cursor:pointer" },
+                { class: "badge badge--neutral", style: "cursor:default" },
                 a,
                 " ",
                 h(
                   "span",
                   {
-                    style: "color:var(--danger);margin-left:4px",
+                    style: "color:var(--danger);margin-left:4px;cursor:pointer",
                     onClick: (e) => {
                       e.stopPropagation();
                       handleUnenroll(course.codigo, a, container);
@@ -110,6 +111,42 @@ function renderCourseCard(course, container) {
           )
         : h("span", { class: "text-faint" }, "Sin alumnos inscritos")
     ),
+    // ─── Coaches (solo se ven, solo admin puede asignar/quitar) ────
+    h(
+      "div",
+      { style: "font-size:0.78rem;margin-bottom:12px" },
+      h(
+        "div",
+        { class: "text-faint", style: "margin-bottom:4px" },
+        `Coaches (${(course.coaches || []).length})`
+      ),
+      (course.coaches || []).length
+        ? h(
+            "div",
+            { class: "flex gap-sm", style: "flex-wrap:wrap" },
+            ...course.coaches.map((c) =>
+              h(
+                "span",
+                { class: "badge badge--neutral", style: "cursor:default" },
+                c,
+                isAdmin()
+                  ? h(
+                      "span",
+                      {
+                        style: "color:var(--danger);margin-left:4px;cursor:pointer",
+                        onClick: (e) => {
+                          e.stopPropagation();
+                          handleRemoveCoach(course.codigo, c, container);
+                        },
+                      },
+                      " ×"
+                    )
+                  : null
+              )
+            )
+          )
+        : h("span", { class: "text-faint" }, "Sin coaches asignados")
+    ),
     h(
       "div",
       { class: "flex gap-sm" },
@@ -118,6 +155,14 @@ function renderCourseCard(course, container) {
         { class: "btn btn-ghost btn-sm", onClick: () => openEnrollModal(course, container) },
         "+ Inscribir alumno"
       ),
+      // Solo admin asigna coaches
+      isAdmin()
+        ? h(
+            "button",
+            { class: "btn btn-ghost btn-sm", onClick: () => openAssignCoachModal(course, container) },
+            "+ Asignar coach"
+          )
+        : null,
       isAdmin()
         ? h(
             "button",
@@ -194,14 +239,17 @@ async function openCreateCourseModal(container) {
 async function openEnrollModal(course, container) {
   let alumnos = [];
   try {
-    const users = await AuthApi.listUsers();
-    alumnos = users.filter((u) => u.rol === "alumno" && !course.alumnos.includes(u.username));
+    // Endpoint dedicado para listar alumnos sin requerir admin (también
+    // disponible para profesor). Reemplaza la llamada anterior a
+    // AuthApi.listUsers que devolvía 403 a profesores.
+    const all = await AuthApi.listStudents();
+    alumnos = all.filter((u) => !course.alumnos.includes(u.username));
   } catch {
     alumnos = [];
   }
 
   if (alumnos.length === 0) {
-    showToast("No hay alumnos disponibles para inscribir (o esta vista requiere rol admin para listarlos)", "info");
+    showToast("No hay alumnos disponibles para inscribir", "info");
     return;
   }
 
@@ -273,6 +321,76 @@ async function handleDeleteCourse(codigo, container) {
   try {
     await AuthApi.deleteCourse(codigo);
     showToast("Curso borrado", "success");
+    renderAdminCourses(container);
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function openAssignCoachModal(course, container) {
+  let coaches = [];
+  try {
+    const all = await AuthApi.listCoaches();
+    coaches = all.filter((u) => !(course.coaches || []).includes(u.username));
+  } catch {
+    coaches = [];
+  }
+
+  if (coaches.length === 0) {
+    showToast("No hay coaches disponibles para asignar", "info");
+    return;
+  }
+
+  await openModal({
+    title: `Asignar coach a ${course.codigo}`,
+    renderContent: (body, close) => {
+      const select = h(
+        "select",
+        { id: "assign-coach-select" },
+        ...coaches.map((c) => h("option", { value: c.username }, c.username))
+      );
+      body.append(
+        h("div", { class: "field" }, h("label", {}, "Coach"), select),
+        h(
+          "div",
+          { class: "modal-actions" },
+          h("button", { class: "btn btn-ghost", onClick: () => close(null) }, "Cancelar"),
+          h(
+            "button",
+            {
+              class: "btn btn-primary",
+              onClick: async () => {
+                try {
+                  await AuthApi.assignCoaches(course.codigo, [select.value]);
+                  showToast(`Coach ${select.value} asignado`, "success");
+                  close(true);
+                } catch (err) {
+                  showError(err);
+                }
+              },
+            },
+            "Asignar"
+          )
+        )
+      );
+    },
+  }).then((result) => {
+    if (result) renderAdminCourses(container);
+  });
+}
+
+async function handleRemoveCoach(codigo, username, container) {
+  const confirmed = await confirmDialog({
+    title: "Quitar coach",
+    message: `¿Quitar a "${username}" como coach del curso ${codigo}?`,
+    confirmLabel: "Quitar",
+    danger: true,
+  });
+  if (!confirmed) return;
+
+  try {
+    await AuthApi.removeCoach(codigo, username);
+    showToast("Coach desasignado", "success");
     renderAdminCourses(container);
   } catch (err) {
     showError(err);

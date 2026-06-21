@@ -11,8 +11,11 @@ import { getUser, getRole, canManageUsers, canManageCourses, logout } from "./au
 const NAV_ITEMS = [
   { path: "/", label: "Dashboard", icon: "◧", roles: null },
   { path: "/slices", label: "Slices", icon: "▤", roles: null },
-  { path: "/slices/new", label: "Nuevo slice", icon: "+", roles: ["admin", "profesor", "alumno"] },
-  { path: "/monitoring", label: "Monitoreo", icon: "▣", roles: null },
+  // Solo admin y profesor pueden crear slices (alumno y coach quedan fuera).
+  { path: "/slices/new", label: "Nuevo slice", icon: "+", roles: ["admin", "profesor"] },
+  // Monitoreo: admin ve workers físicos; profesor/coach ven slices de sus
+  // cursos; alumno NO ve monitoreo (solo sus propios slices desde Dashboard).
+  { path: "/monitoring", label: "Monitoreo", icon: "▣", roles: ["admin", "profesor", "coach"] },
 ];
 
 const ADMIN_NAV_ITEMS = [

@@ -57,6 +57,7 @@ class CursoPublic(BaseModel):
     periodo: str
     activo: bool
     alumnos: list[str] = Field(default_factory=list)
+    coaches: list[str] = Field(default_factory=list)
 
 
 class CursoCreateRequest(BaseModel):
@@ -75,6 +76,11 @@ class CursoUpdateRequest(BaseModel):
 
 class EnrollmentRequest(BaseModel):
     alumno_usernames: list[str] = Field(min_length=1)
+
+
+class CoachAssignmentRequest(BaseModel):
+    """Asignación de uno o más coaches a un curso."""
+    coach_usernames: list[str] = Field(min_length=1)
 
 
 LoginResponse.model_rebuild()

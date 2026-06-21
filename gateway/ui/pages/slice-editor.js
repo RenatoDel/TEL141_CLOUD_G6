@@ -3,11 +3,17 @@
  *
  * Página de creación de slices con canvas visual. Cubre:
  *   - Templates predefinidos (lineal, anillo, malla, árbol, bus) — R1B.
+ *   - APLICACIÓN ADITIVA de templates: aplicar varios sobre el mismo canvas
+ *     (p.ej. anillo + lineal), con auto-rename de nodos para evitar
+ *     colisiones. El primer template REEMPLAZA (canvas vacío); los
+ *     subsiguientes AGREGAN. Hay un botón explícito "Limpiar" para resetear.
  *   - Edición libre de nodos/enlaces (agregar, mover, conectar, borrar).
  *   - Edición de configuración por VM (vcpus/ram/disk/imagen/internet).
- *   - Selección de cluster (linux/openstack) y zona de disponibilidad.
- *   - Para admin/profesor: asignar el slice a otro usuario ("on behalf of")
- *     y, si aplica, a uno de sus cursos.
+ *   - Selección de cluster (linux/openstack).
+ *   - Para profesor: flujo curso → alumno DEPENDIENTE (primero eliges
+ *     curso, después el selector de alumnos se filtra a los inscritos
+ *     en ese curso).
+ *   - Alumnos quedan bloqueados completamente (la ruta redirige).
  */
 
 import { SliceApi, AuthApi } from "../lib/api.js";
@@ -25,7 +31,8 @@ const TEMPLATES = [
 ];
 
 export async function renderSliceEditor(container) {
-  // Protección de ruta: roles read-only (coach) redirigen a /slices.
+  // Roles sin permiso de escritura (coach, alumno) no pueden estar aquí.
+  // canWrite() ya devuelve false para ambos en la nueva auth.js.
   if (!canWrite()) {
     navigate("/slices");
     return;
@@ -42,7 +49,11 @@ export async function renderSliceEditor(container) {
         "div",
         {},
         h("h1", {}, "Nuevo slice"),
-        h("div", { class: "page-subtitle" }, "Diseña la topología y configura cada VM")
+        h(
+          "div",
+          { class: "page-subtitle" },
+          "Diseña la topología y configura cada VM. Puedes combinar varias plantillas en un mismo slice."
+        )
       )
     )
   );
@@ -83,7 +94,7 @@ export async function renderSliceEditor(container) {
   const helpBar = h(
     "div",
     { class: "topo-help" },
-    "Click en un nodo y luego en otro para conectar. Doble click en un nodo para editar su configuración. Click en un enlace para borrarlo."
+    "Aplicar una plantilla con el canvas vacío lo inicializa. Aplicarla con nodos ya existentes AGREGA el subgrafo (para combinar topologías). Click en un nodo y luego en otro para conectar; doble click para editar; click en un enlace para borrarlo."
   );
   canvasWrap.append(toolbar, svg, helpBar);
   editorRoot.append(canvasWrap);
@@ -106,6 +117,13 @@ export async function renderSliceEditor(container) {
           ),
           h(
             "div",
+            { class: "text-faint", style: "font-size:0.75rem;margin-top:-6px;margin-bottom:8px" },
+            canvas.nodes.length === 0
+              ? "El canvas está vacío: esta plantilla lo inicializará."
+              : `El canvas tiene ${canvas.nodes.length} nodos: la nueva plantilla se AGREGARÁ debajo, con nombres auto-renombrados para no colisionar.`
+          ),
+          h(
+            "div",
             { class: "modal-actions" },
             h("button", { class: "btn btn-ghost", onClick: () => close(null) }, "Cancelar"),
             h(
@@ -123,7 +141,10 @@ export async function renderSliceEditor(container) {
         );
       },
     }).then((count) => {
-      if (count) canvas.loadTemplate(template.key, count);
+      if (!count) return;
+      // Aditivo: si el canvas está vacío hace lo mismo que loadTemplate;
+      // si tiene contenido lo agrega como subgrafo separado.
+      canvas.appendTemplate(template.key, count);
     });
   }
 
@@ -133,7 +154,7 @@ export async function renderSliceEditor(container) {
     canvas.addNode(x, y);
   }
 
-  // ─── Sidebar: propiedades del slice + lista de nodos ────────────────
+  // ─── Sidebar ─────────────────────────────────────────────────────────
   const sidebar = h("div", { class: "topo-sidebar" });
   editorRoot.append(sidebar);
 
@@ -282,45 +303,107 @@ async function renderPropsForm(propsCard, canvas, user, role) {
   form.append(nameField.wrapper, clusterField.wrapper);
 
   // ─── On-behalf-of: solo admin/profesor ──────────────────────────────
+  // - admin: selector con todos los alumnos (desde /students-listable)
+  //   + selector opcional de curso.
+  // - profesor: PRIMERO selector de curso, DESPUÉS selector de alumno
+  //   filtrado a inscritos del curso elegido.
   let ownerSelect = null;
   let courseSelect = null;
+
   if (canActOnBehalf()) {
     const onBehalfBlock = h(
       "div",
       { class: "card", style: "background:var(--bg);margin-top:10px;margin-bottom:14px;padding:12px" },
-      h("div", { style: "font-size:0.76rem;color:var(--text-dim);margin-bottom:8px" }, "Crear a nombre de otro usuario (opcional)")
+      h(
+        "div",
+        { style: "font-size:0.76rem;color:var(--text-dim);margin-bottom:8px" },
+        role === "profesor"
+          ? "Asignar slice a un alumno (selecciona primero el curso)"
+          : "Crear a nombre de otro usuario (opcional)"
+      )
     );
 
+    // Cursos visibles para el usuario (admin: todos; profesor: los suyos)
+    let courses = [];
+    try {
+      courses = await AuthApi.listCourses();
+    } catch {
+      courses = [];
+    }
+
     if (role === "admin") {
-      let users = [];
+      // Admin ve TODOS los alumnos; el curso es opcional.
+      let alumnos = [];
       try {
-        users = await AuthApi.listUsers();
+        alumnos = await AuthApi.listStudents();
       } catch {
-        users = [];
+        alumnos = [];
       }
-      const alumnos = users.filter((u) => u.rol === "alumno");
-      const opts = [{ value: "", label: "— Yo mismo —" }, ...alumnos.map((a) => ({ value: a.username, label: a.username }))];
-      const sel = fieldSelect("owner-select", "Alumno destinatario", opts);
-      ownerSelect = sel.input;
-      onBehalfBlock.append(sel.wrapper);
-    } else if (role === "profesor") {
-      let courses = [];
-      try {
-        courses = await AuthApi.listCourses();
-      } catch {
-        courses = [];
-      }
-      const myCourse = courses[0]; // simplificación: primer curso que dicta
-      const opts = [{ value: "", label: "— Yo mismo —" }, ...(myCourse?.alumnos || []).map((a) => ({ value: a, label: a }))];
-      const sel = fieldSelect("owner-select", "Alumno destinatario (de tus cursos)", opts);
+      const ownerOpts = [
+        { value: "", label: "— Yo mismo —" },
+        ...alumnos.map((a) => ({ value: a.username, label: a.username })),
+      ];
+      const sel = fieldSelect("owner-select", "Alumno destinatario", ownerOpts);
       ownerSelect = sel.input;
       onBehalfBlock.append(sel.wrapper);
 
       if (courses.length > 0) {
-        const courseOpts = courses.map((c) => ({ value: String(c.id), label: `${c.codigo} — ${c.nombre}` }));
+        const courseOpts = [
+          { value: "", label: "— Sin curso —" },
+          ...courses.map((c) => ({ value: String(c.id), label: `${c.codigo} — ${c.nombre}` })),
+        ];
+        const courseSel = fieldSelect("course-select", "Curso (opcional)", courseOpts);
+        courseSelect = courseSel.input;
+        onBehalfBlock.append(courseSel.wrapper);
+      }
+    } else if (role === "profesor") {
+      // Profesor: curso primero, alumno filtrado por curso.
+      if (courses.length === 0) {
+        onBehalfBlock.append(
+          h(
+            "p",
+            { class: "text-faint", style: "font-size:0.78rem" },
+            "No dictas ningún curso aún. Solo podrás crear slices para ti mismo."
+          )
+        );
+      } else {
+        const courseOpts = [
+          { value: "", label: "— Para mí mismo —" },
+          ...courses.map((c) => ({ value: String(c.id), label: `${c.codigo} — ${c.nombre}` })),
+        ];
         const courseSel = fieldSelect("course-select", "Curso", courseOpts);
         courseSelect = courseSel.input;
         onBehalfBlock.append(courseSel.wrapper);
+
+        // Selector de alumno (vacío hasta que se elija curso)
+        const ownerSel = fieldSelect("owner-select", "Alumno destinatario", [
+          { value: "", label: "— Para mí mismo —" },
+        ]);
+        ownerSelect = ownerSel.input;
+        ownerSelect.disabled = true;
+        onBehalfBlock.append(ownerSel.wrapper);
+
+        // Al cambiar curso, repuebla el selector de alumno con los alumnos
+        // inscritos en ese curso (vienen ya en course.alumnos).
+        courseSelect.addEventListener("change", () => {
+          const cid = courseSelect.value;
+          ownerSelect.innerHTML = "";
+          if (!cid) {
+            ownerSelect.disabled = true;
+            ownerSelect.append(new Option("— Para mí mismo —", ""));
+            return;
+          }
+          const course = courses.find((c) => String(c.id) === cid);
+          const alumnos = course?.alumnos || [];
+          ownerSelect.disabled = false;
+          ownerSelect.append(new Option("— Para mí mismo —", ""));
+          for (const a of alumnos) {
+            ownerSelect.append(new Option(a, a));
+          }
+          if (alumnos.length === 0) {
+            ownerSelect.append(new Option("(curso sin alumnos inscritos)", ""));
+          }
+        });
       }
     }
 

@@ -95,12 +95,18 @@ async def monitoring_summary(_user=Depends(current_user)):
 
     # Lista real de workers monitoreados, según la topología del proyecto
     # (ver README sección 2 y diagrama de Fase 2): 3 workers Linux + 3
-    # workers OpenStack. No existe "server4-headnode" como nodo monitoreado
-    # por separado — server4 está reservado para pruebas de placement, no
-    # forma parte del pool fijo de node_exporter.
-    wanted = ["server1", "server2", "server3", "worker1", "worker2", "worker3"]
+    # workers OpenStack. Etiquetamos cada uno con su cluster para que la
+    # UI pueda separar por sección.
+    wanted = [
+        ("server1", "linux"),
+        ("server2", "linux"),
+        ("server3", "linux"),
+        ("worker1", "openstack"),
+        ("worker2", "openstack"),
+        ("worker3", "openstack"),
+    ]
     workers = []
-    for node in wanted:
+    for node, cluster in wanted:
         mem_total = results["mem_total"].get(node, 0.0)
         mem_avail = results["mem_avail"].get(node, 0.0)
         disk_total = results["disk_total"].get(node, 0.0)
@@ -111,6 +117,7 @@ async def monitoring_summary(_user=Depends(current_user)):
 
         workers.append({
             "worker": node,
+            "cluster": cluster,
             "status": "up" if results["up"].get(node, 0.0) >= 1 else "down",
             "cpu_percent": round(results["cpu"].get(node, 0.0), 2),
             "mem_total_gb": round(mem_total / (1024 ** 3), 2),
@@ -121,21 +128,92 @@ async def monitoring_summary(_user=Depends(current_user)):
             "disk_free_gb": round(disk_avail / (1024 ** 3), 2),
         })
 
-    totals = {
-        "workers_total": len(workers),
-        "workers_up": sum(1 for w in workers if w["status"] == "up"),
-        "mem_total_gb": round(sum(w["mem_total_gb"] for w in workers), 2),
-        "mem_used_gb": round(sum(w["mem_used_gb"] for w in workers), 2),
-        "disk_total_gb": round(sum(w["disk_total_gb"] for w in workers), 2),
-        "disk_used_gb": round(sum(w["disk_used_gb"] for w in workers), 2),
-        "avg_cpu_percent": round(
-            sum(w["cpu_percent"] for w in workers if w["status"] == "up")
-            / max(sum(1 for w in workers if w["status"] == "up"), 1),
-            2,
-        ),
+    def _totals_for(ws):
+        ups = [w for w in ws if w["status"] == "up"]
+        return {
+            "workers_total": len(ws),
+            "workers_up": len(ups),
+            "mem_total_gb": round(sum(w["mem_total_gb"] for w in ws), 2),
+            "mem_used_gb": round(sum(w["mem_used_gb"] for w in ws), 2),
+            "disk_total_gb": round(sum(w["disk_total_gb"] for w in ws), 2),
+            "disk_used_gb": round(sum(w["disk_used_gb"] for w in ws), 2),
+            "avg_cpu_percent": round(
+                sum(w["cpu_percent"] for w in ups) / max(len(ups), 1), 2
+            ),
+        }
+
+    linux_workers = [w for w in workers if w["cluster"] == "linux"]
+    openstack_workers = [w for w in workers if w["cluster"] == "openstack"]
+
+    return {
+        "workers": workers,
+        "totals": _totals_for(workers),
+        "totals_by_cluster": {
+            "linux": _totals_for(linux_workers),
+            "openstack": _totals_for(openstack_workers),
+        },
     }
 
-    return {"workers": workers, "totals": totals}
+
+@app.get("/monitoring/courses-summary")
+def monitoring_courses_summary(user: dict = Depends(current_user)):
+    """
+    Resumen de slices agrupado por curso, para vista de profesor/coach.
+
+    Por slice incluye: VMs totales, VMs activas, vCPUs/RAM/disco reservados
+    (sumados de los nodos del slice). No expone workers físicos: los coaches
+    auditan SUS cursos sin acceso al monitoreo del fierro.
+
+    Filtrado por RBAC:
+      - admin: ve todos los cursos con slices
+      - profesor: solo cursos que dicta
+      - coach: solo cursos que audita
+      - alumno: solo SUS slices (caso especial: lista plana sin agrupar)
+    """
+    all_graph = [s for s in list_slices() if s.get("mode") == "graph"]
+    visible = filter_slices_for_user(user, all_graph)
+
+    def _vm_active(vm):
+        st = (vm.get("status") or "").lower()
+        return st in ("active", "running")
+
+    def _slice_stats(s):
+        vms = s.get("vms", [])
+        return {
+            "slice_name": s["slice_name"],
+            "cluster": s.get("cluster", "linux"),
+            "owner_username": s.get("owner_username"),
+            "curso_id": s.get("curso_id"),
+            "vm_count": len(vms),
+            "vm_active": sum(1 for vm in vms if _vm_active(vm)),
+            "vcpus_reserved": sum(int(vm.get("vcpus") or 0) for vm in vms),
+            "ram_mb_reserved": sum(int(vm.get("ram_mb") or 0) for vm in vms),
+            "disk_gb_reserved": sum(int(vm.get("disk_gb") or 0) for vm in vms),
+        }
+
+    # Agrupar por curso_id (None = sin curso asignado)
+    by_course: dict = {}
+    for s in visible:
+        cid = s.get("curso_id")
+        key = cid if cid is not None else "sin_curso"
+        by_course.setdefault(key, []).append(_slice_stats(s))
+
+    courses = []
+    for cid, slist in by_course.items():
+        courses.append({
+            "curso_id": None if cid == "sin_curso" else cid,
+            "slices": slist,
+            "totals": {
+                "slices": len(slist),
+                "vms": sum(s["vm_count"] for s in slist),
+                "vms_active": sum(s["vm_active"] for s in slist),
+                "vcpus_reserved": sum(s["vcpus_reserved"] for s in slist),
+                "ram_mb_reserved": sum(s["ram_mb_reserved"] for s in slist),
+                "disk_gb_reserved": sum(s["disk_gb_reserved"] for s in slist),
+            },
+        })
+
+    return {"role": user["role"], "courses": courses}
 
 
 # ════════════════════════════════════════════════════════════════════════════
