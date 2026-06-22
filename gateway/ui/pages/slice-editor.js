@@ -22,6 +22,80 @@ import { h, openModal, showError, showToast } from "../lib/components.js";
 import { getUser, getRole, canActOnBehalf, canWrite } from "../lib/auth.js";
 import { navigate } from "../lib/router.js";
 
+// ─── Catálogo de imágenes disponibles por cluster ─────────────────────
+// Solo se muestran las imágenes verificadas que funcionan en cada cluster.
+// Si se agrega una imagen nueva al lab, solo hay que agregarla aquí.
+const IMAGE_CATALOG = {
+  linux: [
+    { value: "cirros-base.img", label: "Cirros 0.6.2 (ligero, 256MB)", min_ram: 256, min_disk: 4 },
+    { value: "ubuntu-base.img", label: "Ubuntu 22.04 Server (completo)", min_ram: 1024, min_disk: 10 },
+  ],
+  openstack: [
+    { value: "cirros", label: "Cirros 0.6.2 (ligero, 256MB)", min_ram: 256, min_disk: 4 },
+  ],
+};
+
+// ─── Opciones discretas para sliders ──────────────────────────────────
+// RAM: pasos comunes en MB; el slider mapea a estos valores.
+const RAM_OPTIONS = [
+  { mb: 128,  label: "128 MB" },
+  { mb: 256,  label: "256 MB" },
+  { mb: 512,  label: "512 MB" },
+  { mb: 1024, label: "1 GB" },
+  { mb: 2048, label: "2 GB" },
+  { mb: 4096, label: "4 GB" },
+  { mb: 8192, label: "8 GB" },
+];
+
+const VCPU_OPTIONS = [1, 2, 4, 8];
+
+const DISK_OPTIONS = [
+  { gb: 4,   label: "4 GB" },
+  { gb: 10,  label: "10 GB" },
+  { gb: 20,  label: "20 GB" },
+  { gb: 40,  label: "40 GB" },
+  { gb: 80,  label: "80 GB" },
+];
+
+/**
+ * Devuelve el catálogo de imágenes correspondiente al cluster actualmente
+ * seleccionado. Si no se encuentra el cluster, devuelve un fallback con
+ * la imagen Cirros para Linux.
+ */
+function imagesForCluster(cluster) {
+  return IMAGE_CATALOG[cluster] || IMAGE_CATALOG.linux;
+}
+
+/**
+ * Dado un valor en MB, encuentra el índice del slider de RAM más cercano.
+ */
+function ramOptionIndex(mb) {
+  for (let i = 0; i < RAM_OPTIONS.length; i++) {
+    if (RAM_OPTIONS[i].mb >= mb) return i;
+  }
+  return RAM_OPTIONS.length - 1;
+}
+
+/**
+ * Dado un valor en GB, encuentra el índice del slider de disco más cercano.
+ */
+function diskOptionIndex(gb) {
+  for (let i = 0; i < DISK_OPTIONS.length; i++) {
+    if (DISK_OPTIONS[i].gb >= gb) return i;
+  }
+  return DISK_OPTIONS.length - 1;
+}
+
+/**
+ * Dado un valor de vCPUs, encuentra el índice del slider más cercano.
+ */
+function vcpuOptionIndex(v) {
+  for (let i = 0; i < VCPU_OPTIONS.length; i++) {
+    if (VCPU_OPTIONS[i] >= v) return i;
+  }
+  return VCPU_OPTIONS.length - 1;
+}
+
 const TEMPLATES = [
   { key: "linear", label: "Lineal" },
   { key: "ring", label: "Anillo" },
@@ -204,54 +278,263 @@ export async function renderSliceEditor(container) {
   }
 
   async function openNodeEditModal(node) {
+    // El cluster seleccionado afecta qué imágenes están disponibles
+    const clusterEl = document.getElementById("cluster-select");
+    const currentCluster = clusterEl ? clusterEl.value : "linux";
+    const availableImages = imagesForCluster(currentCluster);
+
+    // Si la imagen actual del nodo no está en el catálogo del cluster,
+    // forzar la primera del catálogo (p.ej. al cambiar a OpenStack y la
+    // VM tenía cirros-base.img que solo existe en Linux).
+    let initialImage = node.image_name;
+    if (!availableImages.some((img) => img.value === initialImage)) {
+      initialImage = availableImages[0].value;
+    }
+
     await openModal({
       title: `Configurar ${node.name}`,
       renderContent: (body, close) => {
+        // ─── Estado local del modal ──────────────────────────────
+        // Se mantiene en variables locales para que los sliders y el
+        // selector de imagen interactúen entre sí (validación de RAM/disco
+        // mínimos según la imagen elegida).
+        let selectedImage = initialImage;
+        let selectedRamIdx = ramOptionIndex(node.ram_mb);
+        let selectedDiskIdx = diskOptionIndex(node.disk_gb);
+        let selectedVcpuIdx = vcpuOptionIndex(node.vcpus);
+
+        // ─── Helpers para refrescar los labels de los sliders ────
+        function updateRamLabel() {
+          document.getElementById("node-ram-label").textContent =
+            RAM_OPTIONS[selectedRamIdx].label;
+        }
+        function updateDiskLabel() {
+          document.getElementById("node-disk-label").textContent =
+            DISK_OPTIONS[selectedDiskIdx].label;
+        }
+        function updateVcpuLabel() {
+          document.getElementById("node-vcpu-label").textContent =
+            VCPU_OPTIONS[selectedVcpuIdx] + " vCPU" +
+            (VCPU_OPTIONS[selectedVcpuIdx] > 1 ? "s" : "");
+        }
+
+        // ─── Helper para mostrar warning de RAM/disco insuficiente
+        function refreshImageWarning() {
+          const img = availableImages.find((i) => i.value === selectedImage);
+          if (!img) return;
+          const ramMb = RAM_OPTIONS[selectedRamIdx].mb;
+          const diskGb = DISK_OPTIONS[selectedDiskIdx].gb;
+          const warnEl = document.getElementById("node-image-warn");
+          const warnings = [];
+          if (ramMb < img.min_ram) {
+            warnings.push(`RAM mínima recomendada: ${img.min_ram} MB`);
+          }
+          if (diskGb < img.min_disk) {
+            warnings.push(`Disco mínimo recomendado: ${img.min_disk} GB`);
+          }
+          if (warnings.length > 0) {
+            warnEl.textContent = "⚠ " + warnings.join(" · ");
+            warnEl.style.display = "block";
+          } else {
+            warnEl.style.display = "none";
+          }
+        }
+
+        // ─── Construir el formulario ─────────────────────────────
         body.append(
+          // Nombre
           h(
             "div",
             { class: "field" },
             h("label", {}, "Nombre"),
             h("input", { type: "text", id: "node-name", value: node.name })
           ),
+
+          // Imagen — dropdown filtrado por cluster
           h(
             "div",
-            { class: "field-row" },
+            { class: "field" },
+            h("label", { for: "node-image" }, `Imagen (${currentCluster})`),
             h(
-              "div",
-              { class: "field" },
-              h("label", {}, "vCPUs"),
-              h("input", { type: "number", id: "node-vcpus", value: node.vcpus, min: "1", max: "8" })
+              "select",
+              {
+                id: "node-image",
+                onChange: (e) => {
+                  selectedImage = e.target.value;
+                  refreshImageWarning();
+                },
+              },
+              ...availableImages.map((img) =>
+                h(
+                  "option",
+                  {
+                    value: img.value,
+                    selected: img.value === initialImage ? "selected" : null,
+                  },
+                  img.label
+                )
+              )
             ),
             h(
               "div",
-              { class: "field" },
-              h("label", {}, "RAM (MB)"),
-              h("input", { type: "number", id: "node-ram", value: node.ram_mb, min: "128", step: "128" })
+              {
+                id: "node-image-warn",
+                style:
+                  "display:none;color:#f59e0b;font-size:0.72rem;margin-top:4px",
+              }
             )
           ),
+
+          // vCPUs — slider
           h(
             "div",
             { class: "field" },
-            h("label", {}, "Disco (GB)"),
-            h("input", { type: "number", id: "node-disk", value: node.disk_gb, min: "2", max: "200" })
+            h(
+              "label",
+              { style: "display:flex;justify-content:space-between;align-items:center" },
+              h("span", {}, "vCPUs"),
+              h(
+                "span",
+                {
+                  id: "node-vcpu-label",
+                  class: "mono",
+                  style: "color:var(--accent);font-size:0.85rem",
+                },
+                VCPU_OPTIONS[selectedVcpuIdx] + " vCPU" + (VCPU_OPTIONS[selectedVcpuIdx] > 1 ? "s" : "")
+              )
+            ),
+            h("input", {
+              type: "range",
+              id: "node-vcpus",
+              min: "0",
+              max: String(VCPU_OPTIONS.length - 1),
+              step: "1",
+              value: String(selectedVcpuIdx),
+              style: "width:100%;accent-color:var(--accent)",
+              onInput: (e) => {
+                selectedVcpuIdx = parseInt(e.target.value, 10);
+                updateVcpuLabel();
+              },
+            }),
+            h(
+              "div",
+              {
+                style:
+                  "display:flex;justify-content:space-between;font-size:0.68rem;color:var(--text-faint);margin-top:2px",
+              },
+              ...VCPU_OPTIONS.map((v) => h("span", {}, String(v)))
+            )
           ),
+
+          // RAM — slider
           h(
             "div",
             { class: "field" },
-            h("label", {}, "Imagen"),
-            h("input", { type: "text", id: "node-image", value: node.image_name })
+            h(
+              "label",
+              { style: "display:flex;justify-content:space-between;align-items:center" },
+              h("span", {}, "RAM"),
+              h(
+                "span",
+                {
+                  id: "node-ram-label",
+                  class: "mono",
+                  style: "color:var(--accent);font-size:0.85rem",
+                },
+                RAM_OPTIONS[selectedRamIdx].label
+              )
+            ),
+            h("input", {
+              type: "range",
+              id: "node-ram",
+              min: "0",
+              max: String(RAM_OPTIONS.length - 1),
+              step: "1",
+              value: String(selectedRamIdx),
+              style: "width:100%;accent-color:var(--accent)",
+              onInput: (e) => {
+                selectedRamIdx = parseInt(e.target.value, 10);
+                updateRamLabel();
+                refreshImageWarning();
+              },
+            }),
+            h(
+              "div",
+              {
+                style:
+                  "display:flex;justify-content:space-between;font-size:0.68rem;color:var(--text-faint);margin-top:2px",
+              },
+              ...RAM_OPTIONS.map((o) => h("span", {}, o.label.replace(" ", "")))
+            )
           ),
+
+          // Disco — slider
+          h(
+            "div",
+            { class: "field" },
+            h(
+              "label",
+              { style: "display:flex;justify-content:space-between;align-items:center" },
+              h("span", {}, "Disco"),
+              h(
+                "span",
+                {
+                  id: "node-disk-label",
+                  class: "mono",
+                  style: "color:var(--accent);font-size:0.85rem",
+                },
+                DISK_OPTIONS[selectedDiskIdx].label
+              )
+            ),
+            h("input", {
+              type: "range",
+              id: "node-disk",
+              min: "0",
+              max: String(DISK_OPTIONS.length - 1),
+              step: "1",
+              value: String(selectedDiskIdx),
+              style: "width:100%;accent-color:var(--accent)",
+              onInput: (e) => {
+                selectedDiskIdx = parseInt(e.target.value, 10);
+                updateDiskLabel();
+                refreshImageWarning();
+              },
+            }),
+            h(
+              "div",
+              {
+                style:
+                  "display:flex;justify-content:space-between;font-size:0.68rem;color:var(--text-faint);margin-top:2px",
+              },
+              ...DISK_OPTIONS.map((o) => h("span", {}, o.label.replace(" ", "")))
+            )
+          ),
+
+          // Internet
           h(
             "div",
             { class: "checkbox-field field" },
-            h("input", { type: "checkbox", id: "node-internet", checked: node.internet || null }),
-            h("label", { for: "node-internet", style: "margin:0" }, "Salida/acceso a Internet")
+            h("input", {
+              type: "checkbox",
+              id: "node-internet",
+              checked: node.internet || null,
+            }),
+            h(
+              "label",
+              { for: "node-internet", style: "margin:0" },
+              "Salida/acceso a Internet"
+            )
           ),
+
+          // Botones
           h(
             "div",
             { class: "modal-actions" },
-            h("button", { class: "btn btn-ghost", onClick: () => close(null) }, "Cancelar"),
+            h(
+              "button",
+              { class: "btn btn-ghost", onClick: () => close(null) },
+              "Cancelar"
+            ),
             h(
               "button",
               {
@@ -266,10 +549,10 @@ export async function renderSliceEditor(container) {
                     }
                   }
                   canvas.updateNode(newName || node.name, {
-                    vcpus: parseInt(document.getElementById("node-vcpus").value, 10) || 1,
-                    ram_mb: parseInt(document.getElementById("node-ram").value, 10) || 256,
-                    disk_gb: parseInt(document.getElementById("node-disk").value, 10) || 10,
-                    image_name: document.getElementById("node-image").value.trim() || "cirros-base.img",
+                    vcpus: VCPU_OPTIONS[selectedVcpuIdx],
+                    ram_mb: RAM_OPTIONS[selectedRamIdx].mb,
+                    disk_gb: DISK_OPTIONS[selectedDiskIdx].gb,
+                    image_name: selectedImage,
                     internet: document.getElementById("node-internet").checked,
                   });
                   close(true);
@@ -279,6 +562,9 @@ export async function renderSliceEditor(container) {
             )
           )
         );
+
+        // Evaluar warning inicial (por si la imagen viene con RAM/disco bajos)
+        setTimeout(refreshImageWarning, 0);
       },
     });
   }
@@ -303,6 +589,28 @@ async function renderPropsForm(propsCard, canvas, user, role) {
   ]);
 
   form.append(nameField.wrapper, clusterField.wrapper);
+
+  // Cuando cambia el cluster, normalizar imágenes incompatibles de nodos
+  // existentes. P.ej. al pasar de Linux a OpenStack, "cirros-base.img" se
+  // remplaza por "cirros" (la única disponible en OpenStack actualmente).
+  clusterField.input.addEventListener("change", () => {
+    const newCluster = clusterField.input.value;
+    const valid = imagesForCluster(newCluster).map((i) => i.value);
+    const fallback = imagesForCluster(newCluster)[0].value;
+    let changed = 0;
+    for (const node of canvas.nodes) {
+      if (!valid.includes(node.image_name)) {
+        canvas.updateNode(node.name, { image_name: fallback });
+        changed++;
+      }
+    }
+    if (changed > 0) {
+      showToast(
+        `Se ajustaron ${changed} imagen(es) al catálogo de ${newCluster}`,
+        "info"
+      );
+    }
+  });
 
   // ─── On-behalf-of: solo admin/profesor ──────────────────────────────
   // - admin: selector con todos los alumnos (desde /students-listable)
