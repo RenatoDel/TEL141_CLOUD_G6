@@ -448,7 +448,7 @@ async def ws_vnc_proxy(websocket: WebSocket):
             ("127.0.0.1", vnc_port),   # destino en el worker
             ("127.0.0.1", 0),           # origen local (cualquier puerto)
         )
-        channel.setblocking(False)
+        channel.settimeout(30)
 
         loop = asyncio.get_event_loop()
 
@@ -461,6 +461,8 @@ async def ws_vnc_proxy(websocket: WebSocket):
                         stop_event.set()
                         break
                     await websocket.send_bytes(data)
+                except TimeoutError:
+                    continue  # timeout normal, seguir esperando
                 except Exception:
                     stop_event.set()
                     break
