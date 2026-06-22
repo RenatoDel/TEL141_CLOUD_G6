@@ -407,8 +407,9 @@ async def action_graph_vm(
     if vm_index is None:
         raise HTTPException(status_code=404, detail="VM no encontrada en el slice")
 
+    vm_data = {**found["vms"][vm_index], "slice_id": slice_name}
     result = await graph_orchestrator.action_graph_vm(
-        found["vms"][vm_index], payload.action
+        vm_data, payload.action
     )
     found["vms"][vm_index]["status"] = result.get(
         "status", found["vms"][vm_index].get("status")
