@@ -513,8 +513,17 @@ async def ws_vnc_proxy(websocket: WebSocket):
         await websocket.close(code=1008, reason=str(exc))
         return
 
-    await websocket.accept()
-    logger.info("VNC WebSocket aceptado: worker=%s vm=%s port=%d", worker, vm_name, vnc_port)
+    # noVNC envía "Sec-WebSocket-Protocol: binary" en el handshake y REQUIERE
+    # que el servidor lo confirme. Si el servidor no responde con ese subprotocolo,
+    # noVNC cierra el WebSocket inmediatamente (antes de enviar o recibir datos RFB).
+    # FastAPI/Starlette lo soporta pasando subprotocol= al accept().
+    requested_protocols = websocket.headers.get("sec-websocket-protocol", "")
+    subprotocol = "binary" if "binary" in requested_protocols else None
+    await websocket.accept(subprotocol=subprotocol)
+    logger.info(
+        "VNC WebSocket aceptado: worker=%s vm=%s port=%d subprotocol=%s",
+        worker, vm_name, vnc_port, subprotocol,
+    )
 
     ssh_client: paramiko.SSHClient | None = None
     channel: paramiko.Channel | None = None
