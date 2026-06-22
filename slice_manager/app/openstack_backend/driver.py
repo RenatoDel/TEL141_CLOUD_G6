@@ -1217,12 +1217,103 @@ class OpenStackDriver:
 
     # ── action_graph_vm ───────────────────────────────────────
 
+    # Estado terminal esperado por cada acción.
+    # Si la acción no está aquí se lanza ValueError antes de llegar al polling.
+    _ACTION_FINAL_STATUS = {
+        "start":  "ACTIVE",
+        "stop":   "SHUTOFF",
+        "reboot": "ACTIVE",
+        "pause":  "PAUSED",
+        "resume": "ACTIVE",
+    }
+
+    def _wait_for_action_status(
+        self,
+        server_id: str,
+        target_status: str,
+        token: str,
+        project_id: str,
+        timeout: int = 60,
+    ) -> str:
+        """
+        Polling hasta que el servidor alcance `target_status` Y su
+        `task_state` sea None (acción completada en Nova).
+
+        Renueva el token scoped si el polling supera TOKEN_RENEW_AFTER
+        segundos, igual que `wait_for_server_active`.
+
+        Devuelve el status final (puede ser distinto al esperado si hay
+        timeout o si Nova entra en ERROR).
+        """
+        deadline = time.time() + timeout
+        current_token = token
+        last_renew = time.time()
+
+        while time.time() < deadline:
+            # Renovar token si el polling se alarga
+            if (time.time() - last_renew) > TOKEN_RENEW_AFTER:
+                try:
+                    current_token = self.client.get_scoped_token(project_id)
+                    last_renew = time.time()
+                    logger.info(
+                        "Token renovado durante espera de acción en server %s", server_id
+                    )
+                except Exception as exc:
+                    logger.warning("No se pudo renovar token: %s", exc)
+
+            server = self.client.get_server(server_id, current_token)
+            status = server.get("status", "UNKNOWN")
+            task_state = server.get("OS-EXT-STS:task_state")
+
+            logger.debug(
+                "Polling %s → status=%s task_state=%s (esperando %s)",
+                server_id, status, task_state, target_status,
+            )
+
+            # Condición de éxito: status correcto Y sin tarea en curso
+            if status == target_status and task_state is None:
+                return status
+
+            # Condición de error inmediato
+            if status == "ERROR":
+                fault = server.get("fault", {})
+                raise RuntimeError(
+                    f"VM {server_id} entró en ERROR durante {status}: "
+                    f"{fault.get('message', 'desconocido')}"
+                )
+
+            time.sleep(VM_POLL_INTERVAL)
+
+        # Timeout: devolver el último estado conocido para que el llamador
+        # lo registre y la UI muestre algo razonable.
+        logger.warning(
+            "Timeout esperando %s en server %s (último status: %s)",
+            target_status, server_id, status,
+        )
+        return status
+
     def action_graph_vm(self, vm: dict, action: str) -> dict:
         """
-        Ejecuta una acción sobre una VM de OpenStack.
-        Acciones soportadas: start, stop, reboot, pause, resume
+        Ejecuta una acción sobre una VM de OpenStack y espera a que
+        alcance su estado terminal antes de devolver.
+
+        Acciones soportadas: start, stop, reboot, pause, resume.
+
+        Bugs corregidos vs versión anterior:
+          1. Eliminado admin_token innecesario (se obtenía pero no se usaba).
+          2. Reemplazado time.sleep(2) por polling real con estado terminal.
+          3. Cada acción espera su propio estado final (stop→SHUTOFF, etc.).
+          4. Se espera a que task_state sea None además del status.
         """
         action = (action or "").strip().lower()
+
+        target_status = self._ACTION_FINAL_STATUS.get(action)
+        if target_status is None:
+            raise ValueError(
+                f"Acción no soportada: '{action}'. "
+                f"Válidas: {list(self._ACTION_FINAL_STATUS)}"
+            )
+
         server_id = vm.get("openstack_id") or vm.get("vm_id")
         if not server_id:
             raise ValueError("VM sin openstack_id")
@@ -1231,18 +1322,28 @@ class OpenStackDriver:
         if not project_id:
             raise ValueError("VM sin project_id")
 
-        admin_token = self.client.get_admin_token()
+        # Un único token scoped es suficiente — admin_token no se necesita aquí.
         scoped_token = self.client.get_scoped_token(project_id)
 
-        result = self.client.server_action(server_id, action, scoped_token)
-        time.sleep(2)
-        server = self.client.get_server(server_id, scoped_token)
+        # Enviar la acción a Nova (202 Accepted: Nova la acepta de forma asíncrona)
+        self.client.server_action(server_id, action, scoped_token)
+
+        # Esperar al estado terminal con polling real
+        final_status = self._wait_for_action_status(
+            server_id=server_id,
+            target_status=target_status,
+            token=scoped_token,
+            project_id=project_id,
+            timeout=VM_ACTIVE_TIMEOUT,
+        )
 
         return {
             "vm_name": vm.get("name", server_id),
             "openstack_id": server_id,
             "action": action,
-            "status": server.get("status", "unknown").lower(),
+            "status": final_status.lower(),
+            "expected_status": target_status.lower(),
+            "success": final_status == target_status,
         }
 
     # ── Rollback ──────────────────────────────────────────────
