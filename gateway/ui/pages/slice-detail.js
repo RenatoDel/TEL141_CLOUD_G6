@@ -191,59 +191,16 @@ async function handleDeleteSlice(sliceName) {
 
 function openConsoleInfo(slice, vm) {
   const worker = vm.server || vm.worker;
-  const token = getToken();
-  const proto = window.location.protocol === "https:" ? "wss" : "ws";
-  const wsUrl = `${proto}://${window.location.host}/ws/vnc-proxy?worker=${encodeURIComponent(
-    worker
-  )}&port=${encodeURIComponent(vm.vnc_port)}&token=${encodeURIComponent(token)}`;
+  const token  = getToken();
+  const vmName = vm.name;
 
-  const overlay = h(
-    "div",
-    { class: "modal-overlay modal-overlay--visible" },
-    h(
-      "div",
-      { class: "modal modal--wide" },
-      h(
-        "div",
-        { class: "modal-header" },
-        h("h3", { class: "modal-title" }, `Consola — ${vm.name}`),
-        h("button", { class: "modal-close", onClick: () => overlay.remove() }, "×")
-      ),
-      h(
-        "div",
-        { class: "modal-body" },
-        h(
-          "p",
-          { class: "text-dim", style: "font-size:0.82rem" },
-          "El gateway expone un proxy websocket hacia el puerto VNC real de la VM. Usa esta URL con un visor RFB compatible (p. ej. noVNC) para conectarte:"
-        ),
-        h(
-          "div",
-          {
-            class: "mono",
-            style:
-              "background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:10px;font-size:0.74rem;word-break:break-all;margin:10px 0",
-          },
-          wsUrl
-        ),
-        h(
-          "button",
-          {
-            class: "btn btn-ghost btn-sm",
-            onClick: () => {
-              navigator.clipboard.writeText(wsUrl);
-              showToast("URL copiada al portapapeles", "success");
-            },
-          },
-          "Copiar URL"
-        ),
-        h(
-          "p",
-          { class: "text-faint", style: "font-size:0.74rem;margin-top:14px" },
-          `Worker: ${worker} · Puerto VNC: ${vm.vnc_port}`
-        )
-      )
-    )
-  );
-  document.body.append(overlay);
+  // Construir URL hacia la página vnc-viewer.html que carga noVNC
+  const params = new URLSearchParams({
+    worker,
+    port:  vm.vnc_port,
+    token,
+    vm:    vmName,
+  });
+  const viewerUrl = `${window.location.origin}/vnc-viewer.html?${params.toString()}`;
+  window.open(viewerUrl, "_blank", "noopener");
 }
