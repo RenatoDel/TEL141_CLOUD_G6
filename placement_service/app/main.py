@@ -116,10 +116,17 @@ def _get_db_connection():
     )
 
 
-def get_workers_from_db(zone: Optional[str] = None) -> list[dict]:
+def get_workers_from_db(zone: Optional[str] = None, cluster: Optional[str] = None) -> list[dict]:
     """
     Lee servidor_fisico de MariaDB.
-    Filtra por zona si se especifica.
+
+    Lógica de filtrado:
+      - Si se especifica `zone`:          filtra exactamente por esa zona.
+      - Si no hay `zone` pero sí `cluster`:
+          · cluster="openstack" → solo zonas con prefijo "az-openstack"
+          · cluster="linux"     → excluye zonas de OpenStack (cualquier cosa
+                                    que NO empiece por "az-openstack")
+      - Si no hay ni `zone` ni `cluster`: devuelve todos los workers activos.
     """
     conn = _get_db_connection()
     try:
@@ -128,6 +135,16 @@ def get_workers_from_db(zone: Optional[str] = None) -> list[dict]:
                 cur.execute(
                     "SELECT * FROM servidor_fisico WHERE activo=1 AND zona_disponibilidad=%s",
                     (zone,),
+                )
+            elif cluster == "openstack":
+                cur.execute(
+                    "SELECT * FROM servidor_fisico WHERE activo=1 "
+                    "AND zona_disponibilidad LIKE 'az-openstack%'",
+                )
+            elif cluster == "linux":
+                cur.execute(
+                    "SELECT * FROM servidor_fisico WHERE activo=1 "
+                    "AND zona_disponibilidad NOT LIKE 'az-openstack%'",
                 )
             else:
                 cur.execute("SELECT * FROM servidor_fisico WHERE activo=1")
@@ -521,9 +538,9 @@ async def place(payload: PlacementRequest):
       5. Corre OR-Tools CP-SAT con el hint del greedy
       6. Retorna asignación {vm_id: worker_name}
     """
-    # 1. Workers de MariaDB
+    # 1. Workers de MariaDB — filtrar por zona si se especificó, o por cluster
     try:
-        db_workers = get_workers_from_db(zone=payload.zone)
+        db_workers = get_workers_from_db(zone=payload.zone, cluster=payload.cluster)
     except Exception as exc:
         logger.error("Error conectando a MariaDB: %s", exc)
         raise HTTPException(status_code=503, detail=f"Base de datos no disponible: {exc}")
