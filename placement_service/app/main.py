@@ -153,11 +153,16 @@ def get_workers_from_db(zone: Optional[str] = None, cluster: Optional[str] = Non
         conn.close()
 
 
-def update_worker_resources(assignments: dict[str, str], vms: list[VMSpec], conn=None):
+def update_worker_resources(assignments: dict[str, str], vms: list[VMSpec], conn=None, sign: int = 1):
     """
     Reserva atómica: actualiza vcpus_used, ram_used_mb, storage_used_gb
     en servidor_fisico para cada worker asignado.
-    Se llama ANTES del deploy físico para evitar race conditions.
+
+    sign=+1  → confirmar (sumar recursos al comprometer un slice)
+    sign=-1  → liberar  (restar recursos al borrar un slice)
+
+    Usar `sign` en vez de pasar VMSpec con valores negativos evita
+    que los validadores Pydantic rechacen los valores.
     """
     # Agrupa por worker
     worker_totals: dict[str, dict] = {}
@@ -165,9 +170,9 @@ def update_worker_resources(assignments: dict[str, str], vms: list[VMSpec], conn
         worker_name = assignments[vm.vm_id]
         if worker_name not in worker_totals:
             worker_totals[worker_name] = {"cpu": 0, "ram_mb": 0, "disk_gb": 0}
-        worker_totals[worker_name]["cpu"] += vm.cpu
-        worker_totals[worker_name]["ram_mb"] += int(vm.ram_gb * 1024)
-        worker_totals[worker_name]["disk_gb"] += vm.disk_gb
+        worker_totals[worker_name]["cpu"] += vm.cpu * sign
+        worker_totals[worker_name]["ram_mb"] += int(vm.ram_gb * 1024) * sign
+        worker_totals[worker_name]["disk_gb"] += vm.disk_gb * sign
 
     close_conn = conn is None
     if conn is None:
@@ -651,20 +656,11 @@ class ReleaseRequest(BaseModel):
 def release(payload: ReleaseRequest):
     """
     Libera recursos en MariaDB al borrar un slice.
-    Usa valores negativos para restar lo que se reservó.
+    Pasa sign=-1 para restar en vez de crear VMSpec con valores negativos
+    (que serían rechazados por los validadores Pydantic de VMSpec).
     """
-    # Invertir signo para restar
-    neg_vms = [
-        VMSpec(
-            vm_id=v.vm_id,
-            cpu=-v.cpu,
-            ram_gb=-v.ram_gb,
-            disk_gb=-v.disk_gb,
-        )
-        for v in payload.vms
-    ]
     try:
-        update_worker_resources(payload.assignments, neg_vms)
+        update_worker_resources(payload.assignments, payload.vms, sign=-1)
         return {"success": True, "released": len(payload.vms)}
     except Exception as exc:
         logger.error("Error liberando recursos: %s", exc)
