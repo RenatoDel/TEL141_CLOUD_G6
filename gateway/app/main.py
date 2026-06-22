@@ -23,7 +23,7 @@ AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth_service:9001").rst
 IMAGE_SERVICE_URL = os.getenv("IMAGE_SERVICE_URL", "http://image_service:9004").rstrip("/")
 
 SSH_USER = os.getenv("WORKER_SSH_USER", "ubuntu")
-SSH_KEY_PATH = os.getenv("WORKER_SSH_KEY_PATH", "/root/.ssh/id_ecdsa")
+SSH_KEY_PATH = os.getenv("WORKER_SSH_KEY_PATH", "/app/ssh_keys/id_ecdsa")
 SSH_PASSWORD = os.getenv("WORKER_SSH_PASSWORD", "")
 SSH_CONNECT_TIMEOUT = int(os.getenv("WORKER_SSH_TIMEOUT", "12"))
 
@@ -398,7 +398,7 @@ async def ws_vm_serial(websocket: WebSocket):
 @app.websocket("/ws/vnc-proxy")
 async def ws_vnc_proxy(websocket: WebSocket):
     worker = websocket.query_params.get("worker", "").strip()
-    token = websocket.query_params.get("token", "").strip()
+    token  = websocket.query_params.get("token", "").strip()
     port_raw = websocket.query_params.get("port", "").strip()
 
     try:
@@ -412,69 +412,87 @@ async def ws_vnc_proxy(websocket: WebSocket):
 
     await websocket.accept()
 
-    reader = None
-    writer = None
-    stop_event = asyncio.Event()
+    ssh_client  = None
+    channel     = None
+    stop_event  = asyncio.Event()
 
     try:
-        host = WORKER_MAP[worker]["host"]
-        reader, writer = await asyncio.open_connection(host, vnc_port)
+        w         = WORKER_MAP[worker]
+        ssh_host  = w["host"]   # 10.20.11.189
+        ssh_port  = w["port"]   # 5811 / 5812 / 5813
 
-        async def tcp_to_ws():
+        # Abrir conexión SSH al worker a través del gateway físico
+        ssh_client = paramiko.SSHClient()
+        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        key_path = Path(SSH_KEY_PATH)
+        if key_path.exists():
+            pkey = paramiko.ECDSAKey.from_private_key_file(str(key_path))
+            ssh_client.connect(
+                ssh_host, port=ssh_port,
+                username=SSH_USER, pkey=pkey,
+                timeout=SSH_CONNECT_TIMEOUT,
+                look_for_keys=False, allow_agent=False,
+            )
+        else:
+            ssh_client.connect(
+                ssh_host, port=ssh_port,
+                username=SSH_USER, password=SSH_PASSWORD,
+                timeout=SSH_CONNECT_TIMEOUT,
+            )
+
+        # Canal direct-tcpip: túnel al puerto VNC local del worker
+        transport = ssh_client.get_transport()
+        channel = transport.open_channel(
+            "direct-tcpip",
+            ("127.0.0.1", vnc_port),   # destino en el worker
+            ("127.0.0.1", 0),           # origen local (cualquier puerto)
+        )
+        channel.setblocking(False)
+
+        loop = asyncio.get_event_loop()
+
+        async def ssh_to_ws():
+            """Leer datos del canal SSH y enviarlos al WebSocket."""
             while not stop_event.is_set():
-                data = await reader.read(65536)
-                if not data:
+                try:
+                    data = await loop.run_in_executor(None, lambda: channel.recv(65536))
+                    if not data:
+                        stop_event.set()
+                        break
+                    await websocket.send_bytes(data)
+                except Exception:
                     stop_event.set()
                     break
-                await websocket.send_bytes(data)
 
-        async def ws_to_tcp():
+        async def ws_to_ssh():
+            """Leer datos del WebSocket y enviarlos al canal SSH."""
             while not stop_event.is_set():
                 try:
                     message = await websocket.receive()
                 except WebSocketDisconnect:
                     stop_event.set()
                     break
-
                 if message["type"] == "websocket.disconnect":
                     stop_event.set()
                     break
+                payload = message.get("bytes") or (message.get("text") or "").encode()
+                if payload:
+                    await loop.run_in_executor(None, channel.sendall, payload)
 
-                payload_bytes = message.get("bytes")
-                payload_text = message.get("text")
-
-                if payload_bytes is not None:
-                    writer.write(payload_bytes)
-                    await writer.drain()
-                elif payload_text is not None:
-                    writer.write(payload_text.encode())
-                    await writer.drain()
-
-        tasks = [
-            asyncio.create_task(tcp_to_ws()),
-            asyncio.create_task(ws_to_tcp()),
-        ]
-
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        stop_event.set()
-
-        for task in pending:
-            task.cancel()
-
-        for task in done:
-            with contextlib.suppress(Exception):
-                await task
+        await asyncio.gather(ssh_to_ws(), ws_to_ssh(), return_exceptions=True)
 
     except Exception as exc:
-        logger.exception("Error en VNC proxy para %s:%s", worker, port_raw)
-        with contextlib.suppress(Exception):
-            await websocket.close(code=1011, reason=str(exc))
+        logger.warning("VNC proxy error worker=%s port=%s: %s", worker, port_raw, exc)
     finally:
-        stop_event.set()
-        if writer is not None:
+        if channel:
             with contextlib.suppress(Exception):
-                writer.close()
-                await writer.wait_closed()
+                channel.close()
+        if ssh_client:
+            with contextlib.suppress(Exception):
+                ssh_client.close()
+        with contextlib.suppress(Exception):
+            await websocket.close()
 
 
 UI_DIR = Path("/app/ui")

@@ -134,6 +134,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
     volumes:
       - ./gateway/ui:/app/ui
+      - /home/ubuntu/.ssh:/app/ssh_keys:ro
     depends_on:
       - auth_service
       - slice_manager
