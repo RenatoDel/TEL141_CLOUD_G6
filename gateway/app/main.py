@@ -25,20 +25,30 @@ IMAGE_SERVICE_URL = os.getenv("IMAGE_SERVICE_URL", "http://image_service:9004").
 SSH_USER = os.getenv("WORKER_SSH_USER", "ubuntu")
 SSH_KEY_PATH = os.getenv("WORKER_SSH_KEY_PATH", "/app/ssh_keys/id_ecdsa")
 SSH_PASSWORD = os.getenv("WORKER_SSH_PASSWORD", "")
-SSH_CONNECT_TIMEOUT = int(os.getenv("WORKER_SSH_TIMEOUT", "12"))
+SSH_CONNECT_TIMEOUT = int(os.getenv("WORKER_SSH_TIMEOUT", "15"))
+
+# WORKER_MAP: cada entrada apunta al gateway físico (10.20.11.189) en el puerto
+# que el gateway redirige a ese worker.  Con la VPN del G6 activa y los túneles
+# SSH levantados, el gateway físico hace el forwarding internamente:
+#   gateway:5811 → server1 (192.168.201.1)
+#   gateway:5812 → server2 (192.168.201.2)
+#   gateway:5813 → server3 (192.168.201.3)
+# Así el contenedor pucp_gateway solo necesita alcanzar 10.20.11.189, que SÍ
+# es accesible desde app (10.20.11.113).
+_GW_HOST = os.getenv("GATEWAY_PHYSICAL_HOST", "10.20.11.189")
 
 WORKER_MAP = {
     "server1": {
-        "host": os.getenv("WORKER_SERVER1_HOST", "10.0.10.1"),
-        "port": int(os.getenv("WORKER_SERVER1_PORT", "22")),
+        "host": os.getenv("WORKER_SERVER1_HOST", _GW_HOST),
+        "port": int(os.getenv("WORKER_SERVER1_PORT", "5811")),
     },
     "server2": {
-        "host": os.getenv("WORKER_SERVER2_HOST", "10.0.10.2"),
-        "port": int(os.getenv("WORKER_SERVER2_PORT", "22")),
+        "host": os.getenv("WORKER_SERVER2_HOST", _GW_HOST),
+        "port": int(os.getenv("WORKER_SERVER2_PORT", "5812")),
     },
     "server3": {
-        "host": os.getenv("WORKER_SERVER3_HOST", "10.0.10.3"),
-        "port": int(os.getenv("WORKER_SERVER3_PORT", "22")),
+        "host": os.getenv("WORKER_SERVER3_HOST", _GW_HOST),
+        "port": int(os.getenv("WORKER_SERVER3_PORT", "5813")),
     },
 }
 
@@ -395,102 +405,204 @@ async def ws_vm_serial(websocket: WebSocket):
                 ssh.close()
 
 
+def _open_vnc_channel_sync(
+    ssh_host: str,
+    ssh_port: int,
+    vnc_port: int,
+) -> tuple[paramiko.SSHClient, paramiko.Channel]:
+    """
+    Abre un canal TCP hacia el puerto VNC de una VM en el worker.
+
+    Topología real (Fase 2, Grupo 6):
+        pucp_gateway (contenedor) → SSH → gateway físico 10.20.11.189:ssh_port
+                                          (el gateway hace port-forward al workerN)
+        → direct-tcpip → 127.0.0.1:vnc_port  (QEMU VNC en el worker)
+
+    QEMU se lanza con:  -vnc :<display>   (sin password, sin TLS)
+    Donde vnc_port = 5900 + display.
+
+    Compatible con cirros (dropbear + QEMU mínimo) y Ubuntu (cloud-init).
+    """
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    connect_kwargs: dict = {
+        "hostname": ssh_host,
+        "port": ssh_port,
+        "username": SSH_USER,
+        "timeout": SSH_CONNECT_TIMEOUT,
+        "banner_timeout": SSH_CONNECT_TIMEOUT,
+        "auth_timeout": SSH_CONNECT_TIMEOUT,
+        "look_for_keys": False,
+        "allow_agent": False,
+        # Deshabilitar compresión para no añadir latencia en el stream VNC
+        "compress": False,
+    }
+
+    key_path = Path(SSH_KEY_PATH)
+    if key_path.exists():
+        # Intentar ECDSA primero (llave del proyecto); si falla, RSA genérico
+        try:
+            connect_kwargs["pkey"] = paramiko.ECDSAKey.from_private_key_file(str(key_path))
+        except paramiko.SSHException:
+            connect_kwargs["key_filename"] = str(key_path)
+    elif SSH_PASSWORD:
+        connect_kwargs["password"] = SSH_PASSWORD
+    else:
+        raise RuntimeError(
+            f"No hay llave SSH en {SSH_KEY_PATH} ni WORKER_SSH_PASSWORD configurado"
+        )
+
+    logger.info("VNC: SSH → %s:%d (worker port-forward)", ssh_host, ssh_port)
+    ssh.connect(**connect_kwargs)
+
+    transport = ssh.get_transport()
+    if transport is None:
+        raise RuntimeError("Transport SSH nulo tras connect()")
+
+    # Mantener alive el transporte — importante para streams VNC largos
+    transport.set_keepalive(20)
+
+    logger.info("VNC: abriendo direct-tcpip → 127.0.0.1:%d (QEMU VNC)", vnc_port)
+    channel = transport.open_channel(
+        "direct-tcpip",
+        dest_addr=("127.0.0.1", vnc_port),
+        src_addr=("127.0.0.1", 0),
+        timeout=10,
+    )
+
+    # Sin timeout bloqueante en recv — usamos run_in_executor con canal sin timeout
+    # para no mezclar el loop de asyncio con bloqueos de paramiko.
+    channel.setblocking(True)
+    channel.settimeout(None)   # bloqueante puro; asyncio lo corre en executor
+
+    logger.info("VNC: canal direct-tcpip abierto OK hacia 127.0.0.1:%d", vnc_port)
+    return ssh, channel
+
+
 @app.websocket("/ws/vnc-proxy")
 async def ws_vnc_proxy(websocket: WebSocket):
-    worker = websocket.query_params.get("worker", "").strip()
-    token  = websocket.query_params.get("token", "").strip()
-    port_raw = websocket.query_params.get("port", "").strip()
+    """
+    Proxy WebSocket ↔ VNC (RFB) para las VMs del cluster Linux.
 
+    El flujo es:
+      noVNC (browser) --WS--> /ws/vnc-proxy --SSH direct-tcpip--> QEMU VNC
+
+    Parámetros query string:
+      worker  : nombre del worker (server1 / server2 / server3)
+      port    : puerto VNC de la VM (5900 + display, ej. 5901)
+      token   : JWT del sistema (validación mínima: no vacío)
+      vm      : nombre de la VM (solo para logging)
+
+    Funciona con cirros (imagen ligera, QEMU sin password VNC) y Ubuntu
+    (cloud-init, misma arquitectura de VNC sin password).
+    """
+    worker   = websocket.query_params.get("worker", "").strip()
+    token    = websocket.query_params.get("token", "").strip()
+    port_raw = websocket.query_params.get("port", "").strip()
+    vm_name  = websocket.query_params.get("vm", "unknown").strip()
+
+    # ── Validación temprana (antes de accept para poder cerrar con código) ──
     try:
         _require_worker_and_token(worker, token)
         vnc_port = int(port_raw)
-        if vnc_port < 5900 or vnc_port > 65535:
-            raise RuntimeError("Puerto VNC inválido")
+        if not (5900 <= vnc_port <= 65535):
+            raise ValueError(f"Puerto VNC fuera de rango: {vnc_port}")
     except Exception as exc:
+        logger.warning("VNC rechazado: %s", exc)
         await websocket.close(code=1008, reason=str(exc))
         return
 
     await websocket.accept()
+    logger.info("VNC WebSocket aceptado: worker=%s vm=%s port=%d", worker, vm_name, vnc_port)
 
-    ssh_client  = None
-    channel     = None
-    stop_event  = asyncio.Event()
+    ssh_client: paramiko.SSHClient | None = None
+    channel: paramiko.Channel | None = None
+    stop_event = asyncio.Event()
+    loop = asyncio.get_event_loop()
 
     try:
-        w         = WORKER_MAP[worker]
-        ssh_host  = w["host"]   # 10.20.11.189
-        ssh_port  = w["port"]   # 5811 / 5812 / 5813
+        w = WORKER_MAP[worker]
 
-        # Abrir conexión SSH al worker a través del gateway físico
-        ssh_client = paramiko.SSHClient()
-        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        key_path = Path(SSH_KEY_PATH)
-        if key_path.exists():
-            pkey = paramiko.ECDSAKey.from_private_key_file(str(key_path))
-            ssh_client.connect(
-                ssh_host, port=ssh_port,
-                username=SSH_USER, pkey=pkey,
-                timeout=SSH_CONNECT_TIMEOUT,
-                look_for_keys=False, allow_agent=False,
-            )
-        else:
-            ssh_client.connect(
-                ssh_host, port=ssh_port,
-                username=SSH_USER, password=SSH_PASSWORD,
-                timeout=SSH_CONNECT_TIMEOUT,
-            )
-
-        # Canal direct-tcpip: túnel al puerto VNC local del worker
-        transport = ssh_client.get_transport()
-        channel = transport.open_channel(
-            "direct-tcpip",
-            ("127.0.0.1", vnc_port),   # destino en el worker
-            ("127.0.0.1", 0),           # origen local (cualquier puerto)
+        # Abrir canal SSH+direct-tcpip en un thread (operación bloqueante)
+        ssh_client, channel = await loop.run_in_executor(
+            None,
+            _open_vnc_channel_sync,
+            w["host"],
+            w["port"],
+            vnc_port,
         )
-        channel.settimeout(30)
 
-        loop = asyncio.get_event_loop()
-
-        async def ssh_to_ws():
-            """Leer datos del canal SSH y enviarlos al WebSocket."""
-            while not stop_event.is_set():
-                try:
-                    data = await loop.run_in_executor(None, lambda: channel.recv(65536))
+        # ── Pump: canal SSH → WebSocket ──────────────────────────────────
+        async def ssh_to_ws() -> None:
+            try:
+                while not stop_event.is_set():
+                    # channel.recv es bloqueante → executor para no congelar asyncio
+                    data: bytes = await loop.run_in_executor(
+                        None, channel.recv, 65536
+                    )
                     if not data:
+                        # EOF del lado VNC (VM apagada / QEMU terminó)
+                        logger.info("VNC EOF recibido de QEMU (worker=%s vm=%s)", worker, vm_name)
                         stop_event.set()
                         break
                     await websocket.send_bytes(data)
-                except TimeoutError:
-                    continue  # timeout normal, seguir esperando
-                except Exception:
-                    stop_event.set()
-                    break
+            except Exception as exc:
+                if not stop_event.is_set():
+                    logger.debug("VNC ssh→ws terminó: %s", exc)
+                stop_event.set()
 
-        async def ws_to_ssh():
-            """Leer datos del WebSocket y enviarlos al canal SSH."""
-            while not stop_event.is_set():
-                try:
+        # ── Pump: WebSocket → canal SSH ──────────────────────────────────
+        async def ws_to_ssh() -> None:
+            try:
+                while not stop_event.is_set():
                     message = await websocket.receive()
-                except WebSocketDisconnect:
-                    stop_event.set()
-                    break
-                if message["type"] == "websocket.disconnect":
-                    stop_event.set()
-                    break
-                payload = message.get("bytes") or (message.get("text") or "").encode()
-                if payload:
-                    await loop.run_in_executor(None, channel.sendall, payload)
+                    if message["type"] == "websocket.disconnect":
+                        logger.info("VNC: navegador cerró WebSocket (worker=%s vm=%s)", worker, vm_name)
+                        stop_event.set()
+                        break
+                    # noVNC envía datos binarios (bytes del protocolo RFB)
+                    payload: bytes = (
+                        message.get("bytes")
+                        or (message.get("text") or "").encode("latin-1")
+                    )
+                    if payload:
+                        await loop.run_in_executor(None, channel.sendall, payload)
+            except WebSocketDisconnect:
+                stop_event.set()
+            except Exception as exc:
+                if not stop_event.is_set():
+                    logger.debug("VNC ws→ssh terminó: %s", exc)
+                stop_event.set()
 
-        await asyncio.gather(ssh_to_ws(), ws_to_ssh(), return_exceptions=True)
+        # Correr ambos pumps en paralelo; terminar cuando cualquiera pare
+        t_ssh = asyncio.create_task(ssh_to_ws())
+        t_ws  = asyncio.create_task(ws_to_ssh())
+        done, pending = await asyncio.wait(
+            [t_ssh, t_ws], return_when=asyncio.FIRST_COMPLETED
+        )
+        stop_event.set()
+        for t in pending:
+            t.cancel()
+        # Absorber excepciones de las tareas completadas
+        for t in done:
+            with contextlib.suppress(Exception):
+                await t
+
+        logger.info("VNC sesión terminada: worker=%s vm=%s port=%d", worker, vm_name, vnc_port)
 
     except Exception as exc:
-        logger.warning("VNC proxy error worker=%s port=%s: %s", worker, port_raw, exc)
+        logger.warning(
+            "VNC proxy error: worker=%s vm=%s port=%s — %s",
+            worker, vm_name, port_raw, exc,
+        )
+        with contextlib.suppress(Exception):
+            await websocket.send_bytes(b"")  # flush para que el browser detecte cierre
     finally:
-        if channel:
+        if channel is not None:
             with contextlib.suppress(Exception):
                 channel.close()
-        if ssh_client:
+        if ssh_client is not None:
             with contextlib.suppress(Exception):
                 ssh_client.close()
         with contextlib.suppress(Exception):
