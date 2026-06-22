@@ -193,7 +193,7 @@ def update_worker_resources(assignments: dict[str, str], vms: list[VMSpec], conn
                         totals["cpu"],
                         totals["ram_mb"],
                         totals["disk_gb"],
-                        sum(1 for v in vms if assignments[v.vm_id] == worker_name),
+                        sum(1 for v in vms if assignments[v.vm_id] == worker_name) * sign,
                         worker_name,
                     ),
                 )
