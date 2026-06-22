@@ -604,22 +604,25 @@ class OpenStackClient:
             token=token, ok=(200, 202, 204, 404),
         )
 
-    def server_action(self, server_id: str, action: str, token: str) -> dict:
+    def _action_body(self, action: str) -> dict:
+        """Devuelve el body JSON correcto para cada acción de Nova."""
         action_map = {
-            "start": {"os-start": None},
-            "stop": {"os-stop": None},
+            "start":  {"os-start": None},
+            "stop":   {"os-stop": None},
             "reboot": {"reboot": {"type": "SOFT"}},
-            "pause": {"pause": None},
+            "pause":  {"pause": None},
             "resume": {"unpause": None},
         }
         body = action_map.get(action)
         if body is None:
             raise ValueError(f"Acción no soportada: {action}")
+        return body
 
+    def server_action(self, server_id: str, action: str, token: str) -> dict:
         self._request(
             "POST", f"{self.nova_url()}/servers/{server_id}/action",
             token=token, ok=(200, 202),
-            json=body,
+            json=self._action_body(action),
         )
         return {"action": action, "server_id": server_id}
 
@@ -1325,10 +1328,61 @@ class OpenStackDriver:
         # Un único token scoped es suficiente — admin_token no se necesita aquí.
         scoped_token = self.client.get_scoped_token(project_id)
 
-        # Enviar la acción a Nova (202 Accepted: Nova la acepta de forma asíncrona)
-        self.client.server_action(server_id, action, scoped_token)
+        # ── Pre-flight: esperar a que Nova termine cualquier tarea pendiente ──
+        # Si la VM tiene task_state != None (p.ej. "powering-off" de un intento
+        # anterior), Nova responderá 409 Conflict. Esperamos hasta que quede libre.
+        logger.info(
+            "Verificando task_state de %s antes de enviar acción '%s'...",
+            server_id, action,
+        )
+        preflight_deadline = time.time() + 30  # máx 30s esperando que se libere
+        while time.time() < preflight_deadline:
+            srv = self.client.get_server(server_id, scoped_token)
+            task_state = srv.get("OS-EXT-STS:task_state")
+            if task_state is None:
+                break
+            logger.debug(
+                "VM %s tiene task_state='%s', esperando...", server_id, task_state
+            )
+            time.sleep(VM_POLL_INTERVAL)
+        else:
+            logger.warning(
+                "VM %s sigue con task_state='%s' tras 30s — intentando la acción igualmente",
+                server_id, srv.get("OS-EXT-STS:task_state"),
+            )
 
-        # Esperar al estado terminal con polling real
+        # ── Enviar la acción con retry ante 409 ──────────────────────────────
+        # Nova puede devolver 409 por race condition incluso tras el pre-flight.
+        # Reintentamos hasta 3 veces con backoff corto.
+        MAX_RETRIES = 3
+        for attempt in range(1, MAX_RETRIES + 1):
+            r = self.client._request(
+                "POST",
+                f"{self.client.nova_url()}/servers/{server_id}/action",
+                token=scoped_token,
+                ok=(200, 202, 409),
+                raise_for_status=False,
+                json=self.client._action_body(action),
+            )
+            if r.status_code in (200, 202):
+                break
+            if r.status_code == 409:
+                if attempt < MAX_RETRIES:
+                    logger.warning(
+                        "409 Conflict enviando acción '%s' a %s (intento %d/%d), "
+                        "reintentando en %ds...",
+                        action, server_id, attempt, MAX_RETRIES, attempt * 3,
+                    )
+                    time.sleep(attempt * 3)
+                    scoped_token = self.client.get_scoped_token(project_id)
+                else:
+                    body = r.text
+                    raise RuntimeError(
+                        f"Nova rechazó la acción '{action}' con 409 tras {MAX_RETRIES} "
+                        f"intentos. Body: {body[:300]}"
+                    )
+
+        # ── Esperar al estado terminal con polling real ───────────────────────
         final_status = self._wait_for_action_status(
             server_id=server_id,
             target_status=target_status,
