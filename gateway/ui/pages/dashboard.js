@@ -18,7 +18,15 @@ import { SliceApi, AuthApi } from "../lib/api.js";
 import { h, statusBadge, showError } from "../lib/components.js";
 import { getUser, getRole, isAdmin, isAlumno, isProfesor, isCoach, canWrite } from "../lib/auth.js";
 
+// Token de generación: cada llamada a renderDashboard incrementa este contador.
+// Las funciones async comprueban si su token sigue siendo el actual antes de
+// escribir al DOM — si no lo es, significa que llegó un render más nuevo y
+// esta ejecución debe abortarse silenciosamente. Esto previene la duplicación
+// de contenido que ocurre cuando el router llama al render dos veces rápido.
+let _dashGen = 0;
+
 export async function renderDashboard(container) {
+  const gen = ++_dashGen;
   const user = getUser();
   const role = getRole();
 
@@ -33,36 +41,29 @@ export async function renderDashboard(container) {
         h("h1", {}, `Hola, ${user.username}`),
         h("div", { class: "page-subtitle" }, roleLabel(role))
       ),
-      // Solo admin/profesor pueden crear slices desde el dashboard.
       canWrite()
-        ? h(
-            "a",
-            { href: "#/slices/new", class: "btn btn-primary" },
-            "+ Nuevo slice"
-          )
+        ? h("a", { href: "#/slices/new", class: "btn btn-primary" }, "+ Nuevo slice")
         : null
     )
   );
 
-  // ─── Vistas especializadas por rol ──────────────────────────────────
   if (isAlumno()) {
-    await renderAlumnoDashboard(container);
+    await renderAlumnoDashboard(container, gen);
     return;
   }
 
   if (isProfesor() || isCoach()) {
-    await renderCourseAggregatedDashboard(container);
+    await renderCourseAggregatedDashboard(container, gen);
     return;
   }
 
-  // Admin: stats globales + workers por cluster
-  await renderAdminDashboard(container);
+  await renderAdminDashboard(container, gen);
 }
 
 // ════════════════════════════════════════════════════════════════════════
 // Dashboard de ALUMNO: solo sus slices, agrupados por curso
 // ════════════════════════════════════════════════════════════════════════
-async function renderAlumnoDashboard(container) {
+async function renderAlumnoDashboard(container, gen) {
   let slices = [];
   let courses = [];
   try {
@@ -73,6 +74,7 @@ async function renderAlumnoDashboard(container) {
   } catch (err) {
     showError(err);
   }
+  if (gen !== _dashGen) return; // render más nuevo llegó, abortar
 
   if (courses.length === 0 && slices.length === 0) {
     container.append(
@@ -182,7 +184,7 @@ function renderCourseSection(course, slices) {
 // ════════════════════════════════════════════════════════════════════════
 // Dashboard de PROFESOR/COACH: agregado por curso (sin workers físicos)
 // ════════════════════════════════════════════════════════════════════════
-async function renderCourseAggregatedDashboard(container) {
+async function renderCourseAggregatedDashboard(container, gen) {
   let data = null;
   let courses = [];
   try {
@@ -194,6 +196,7 @@ async function renderCourseAggregatedDashboard(container) {
     showError(err);
     return;
   }
+  if (gen !== _dashGen) return; // render más nuevo llegó, abortar
 
   // Stats globales (sumando todos los cursos visibles)
   const allSlices = data.courses.flatMap((c) => c.slices);
@@ -326,20 +329,20 @@ function renderCourseAggregateCard(course, courseData) {
 // ════════════════════════════════════════════════════════════════════════
 // Dashboard de ADMIN: stats globales + workers por cluster (Linux/OpenStack)
 // ════════════════════════════════════════════════════════════════════════
-async function renderAdminDashboard(container) {
+async function renderAdminDashboard(container, gen) {
   const statsRow = h("div", { class: "card-grid mb-md" });
   container.append(statsRow);
 
   const clusterSection = h("div", {});
   container.append(clusterSection);
 
-  // Stats de slices
   let slices = [];
   try {
     slices = await SliceApi.listGraphSlices();
   } catch (err) {
     showError(err);
   }
+  if (gen !== _dashGen) return; // render más nuevo llegó, abortar
   const activeCount = slices.filter((s) =>
     (s.vms || []).some((vm) => {
       const st = (vm.status || "").toLowerCase();
@@ -406,6 +409,7 @@ async function renderAdminDashboard(container) {
   // Monitoreo separado por cluster
   try {
     const summary = await SliceApi.monitoringSummary();
+    if (gen !== _dashGen) return;
     renderClusterSection(clusterSection, "Linux Cluster", "linux", summary);
     renderClusterSection(clusterSection, "OpenStack Cluster", "openstack", summary);
   } catch (err) {
@@ -455,9 +459,9 @@ function renderClusterSection(parent, title, clusterKey, summary) {
         h(
           "div",
           { class: "mt-md" },
-          resourceBar("CPU (uso real)", w.cpu_percent, 100, "%"),
-          resourceBar("RAM reservada", w.mem_used_gb, w.mem_total_gb, "GB"),
-          resourceBar("Disco reservado", w.disk_used_gb, w.disk_total_gb, "GB")
+          resourceBar("CPU", w.cpu_percent, 100, "%"),
+          resourceBar("RAM", w.mem_used_gb, w.mem_total_gb, "GB"),
+          resourceBar("Disco", w.disk_used_gb, w.disk_total_gb, "GB")
         )
       )
     );

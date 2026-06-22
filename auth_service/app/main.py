@@ -395,7 +395,7 @@ def list_courses(user: dict = Depends(current_user)):
                 )
             else:  # alumno
                 cur.execute(
-                    "SELECT c.id, c.codigo, c.nombre, c.profesor_id, c.periodo, c.activo "
+                    "SELECT DISTINCT c.id, c.codigo, c.nombre, c.profesor_id, c.periodo, c.activo "
                     "FROM curso c JOIN curso_alumno ca ON ca.curso_id=c.id "
                     "WHERE ca.alumno_id=%s AND c.activo=1 ORDER BY c.codigo",
                     (user["uid"],),

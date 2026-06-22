@@ -91,12 +91,14 @@ export async function renderSliceEditor(container) {
   );
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "topo-svg");
+  const svgScroll = h("div", { class: "topo-svg-scroll" });
+  svgScroll.append(svg);
   const helpBar = h(
     "div",
     { class: "topo-help" },
     "Aplicar una plantilla con el canvas vacío lo inicializa. Aplicarla con nodos ya existentes AGREGA el subgrafo (para combinar topologías). Click en un nodo y luego en otro para conectar; doble click para editar; click en un enlace para borrarlo."
   );
-  canvasWrap.append(toolbar, svg, helpBar);
+  canvasWrap.append(toolbar, svgScroll, helpBar);
   editorRoot.append(canvasWrap);
 
   const canvas = new TopologyCanvas(svg, {

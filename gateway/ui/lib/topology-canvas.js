@@ -310,6 +310,21 @@ export class TopologyCanvas {
     this.linksLayer.innerHTML = "";
     this.nodesLayer.innerHTML = "";
 
+    // ── Calcular extensión real de los nodos para expandir el viewBox ──
+    const PAD = 60;
+    const maxY = this.nodes.length
+      ? Math.max(...this.nodes.map((n) => n.y)) + NODE_RADIUS + PAD
+      : 480;
+    const maxX = this.nodes.length
+      ? Math.max(...this.nodes.map((n) => n.x)) + NODE_RADIUS + PAD
+      : 800;
+    const vbH = Math.max(480, maxY);
+    const vbW = Math.max(800, maxX);
+    this.svg.setAttribute("viewBox", `0 0 ${vbW} ${vbH}`);
+    // Hacer el SVG tan alto como el contenido; el wrapper lo hace scrollable.
+    this.svg.style.width = "100%";
+    this.svg.style.minHeight = `${vbH}px`;
+
     for (const link of this.links) {
       const from = this.nodes.find((n) => n.name === link.from_node);
       const to = this.nodes.find((n) => n.name === link.to_node);
@@ -365,7 +380,7 @@ export class TopologyCanvas {
       });
       group.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (this.dragState && this.dragState.moved) return; // fue drag, no click
+        if (this.dragState && this.dragState.moved) return;
         this._handleNodeClick(node.name);
       });
       group.addEventListener("dblclick", (e) => {
@@ -398,8 +413,10 @@ export class TopologyCanvas {
     const node = this.nodes.find((n) => n.name === this.dragState.name);
     if (!node) return;
     const { x, y } = this._svgPoint(evt);
-    node.x = Math.max(NODE_RADIUS, Math.min(800 - NODE_RADIUS, x));
-    node.y = Math.max(NODE_RADIUS, Math.min(480 - NODE_RADIUS, y));
+    // Clamp dentro del viewBox actual (puede ser mayor que 800×480 si hay muchos nodos)
+    const vb = this.svg.viewBox.baseVal;
+    node.x = Math.max(NODE_RADIUS, Math.min(vb.width - NODE_RADIUS, x));
+    node.y = Math.max(NODE_RADIUS, Math.min(vb.height - NODE_RADIUS, y));
     this.dragState.moved = true;
     this._render();
   }

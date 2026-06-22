@@ -130,14 +130,14 @@ function renderClusterBlock(section, title, clusterKey, summary) {
         h(
           "div",
           { class: "mt-md" },
-          resourceRow("CPU (uso real)", `${w.cpu_percent.toFixed(1)}%`, w.cpu_percent),
+          resourceRow("CPU", `${w.cpu_percent.toFixed(1)}%`, w.cpu_percent),
           resourceRow(
-            "RAM reservada",
+            "RAM",
             `${w.mem_used_gb.toFixed(1)} / ${w.mem_total_gb.toFixed(1)} GB`,
             (w.mem_used_gb / Math.max(w.mem_total_gb, 1)) * 100
           ),
           resourceRow(
-            "Disco reservado",
+            "Disco",
             `${w.disk_used_gb.toFixed(1)} / ${w.disk_total_gb.toFixed(1)} GB`,
             (w.disk_used_gb / Math.max(w.disk_total_gb, 1)) * 100
           )
