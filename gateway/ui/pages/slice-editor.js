@@ -463,12 +463,19 @@ async function handleSubmit({ canvas, nameInput, clusterInput, ownerSelect, cour
     return;
   }
 
+  const nodes = canvas.toPayloadNodes();
+
+  // Si algún nodo tiene internet:true, activar headnode_nat automáticamente.
+  // Sin este campo el backend usa "none" y nunca crea la interfaz de salida.
+  const hasInternet = nodes.some(n => n.internet);
+
   const payload = {
     slice_name: sliceName,
     // vlan_base omitido → el backend asigna automáticamente la siguiente libre
     cluster,
-    nodes: canvas.toPayloadNodes(),
+    nodes,
     links: canvas.toPayloadLinks(),
+    internet_mode: hasInternet ? "headnode_nat" : "none",
   };
 
   if (ownerSelect && ownerSelect.value) {
