@@ -1167,22 +1167,24 @@ class LinuxDriver:
         if action not in {"start", "stop", "reboot", "pause", "resume"}:
             raise ValueError(f"Acción no soportada: {action}")
 
+        slice_id = vm.get("slice_id", "")
+
         with self._worker_client(vm["server"]) as client:
             mgr = VMManager(client)
 
             if action == "start":
-                mgr.start_vm(vm["name"])
+                mgr.start_vm(vm["name"], slice_id)
             elif action == "stop":
-                mgr.stop_vm(vm["name"])
+                mgr.stop_vm(vm["name"], slice_id=slice_id)
             elif action == "reboot":
-                mgr.reboot_vm(vm["name"])
+                mgr.reboot_vm(vm["name"], slice_id)
             elif action == "pause":
-                mgr.pause_vm(vm["name"])
+                mgr.pause_vm(vm["name"], slice_id=slice_id)
             elif action == "resume":
-                mgr.resume_vm(vm["name"])
+                mgr.resume_vm(vm["name"], slice_id=slice_id)
 
             time.sleep(1)
-            status = mgr.get_vm_status(vm["name"])
+            status = mgr.get_vm_status(vm["name"], slice_id)
 
         return {
             "vm_name": vm["name"],
