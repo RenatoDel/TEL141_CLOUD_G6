@@ -36,15 +36,16 @@ function _nextLinkId(existingIds) {
 }
 
 export class TopologyCanvas {
-  constructor(svgEl, { onChange, onNodeEdit, readonly = false } = {}) {
+  constructor(svgEl, { onChange, onNodeEdit, readonly = false, viewOnly = false } = {}) {
     this.svg = svgEl;
     this.onChange = onChange || (() => {});
     this.onNodeEdit = onNodeEdit || (() => {});
-    // readonly: cuando es true, el canvas solo dibuja la topología sin
-    // permitir interacción (drag, click-to-link, eliminar enlaces, doble
-    // click para editar). Usado por slice-detail.js para mostrar la
-    // topología desplegada en modo solo-lectura.
+    // readonly   : sin ninguna interacción (ni drag)
+    // viewOnly   : permite drag para reposicionar nodos visualmente,
+    //              pero NO permite click-to-link, dblclick editar,
+    //              ni borrar enlaces. Usado en slice-detail.
     this.readonly = readonly;
+    this.viewOnly = viewOnly;
 
     this.nodes = []; // {name, x, y, vcpus, ram_mb, disk_gb, image_name, internet, preferred_worker}
     this.links = []; // {id, from_node, to_node}
@@ -339,7 +340,7 @@ export class TopologyCanvas {
         x1: from.x, y1: from.y, x2: to.x, y2: to.y,
         class: "topo-link",
       });
-      if (!this.readonly) {
+      if (!this.readonly && !this.viewOnly) {
         line.addEventListener("click", (e) => {
           e.stopPropagation();
           this.removeLink(link.id);
@@ -347,8 +348,8 @@ export class TopologyCanvas {
       }
       this.linksLayer.append(line);
 
-      // En modo readonly no mostramos el botón de borrar enlace
-      if (!this.readonly) {
+      // En modo readonly/viewOnly no mostramos el botón de borrar enlace
+      if (!this.readonly && !this.viewOnly) {
         const midX = (from.x + to.x) / 2;
         const midY = (from.y + to.y) / 2;
         const delBtn = this._svgEl("circle", {
@@ -385,22 +386,30 @@ export class TopologyCanvas {
       group.append(circle, label);
 
       if (!this.readonly) {
+        // pointerdown: inicia drag (tanto en edición completa como viewOnly)
         group.addEventListener("pointerdown", (e) => {
           e.stopPropagation();
           this.dragState = { name: node.name, moved: false };
         });
-        group.addEventListener("click", (e) => {
-          e.stopPropagation();
-          if (this.dragState && this.dragState.moved) return;
-          this._handleNodeClick(node.name);
-        });
-        group.addEventListener("dblclick", (e) => {
-          e.stopPropagation();
-          this.onNodeEdit(node);
-        });
+
+        if (!this.viewOnly) {
+          // Solo en modo edición completa: click-to-link y dblclick editar
+          group.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (this.dragState && this.dragState.moved) return;
+            this._handleNodeClick(node.name);
+          });
+          group.addEventListener("dblclick", (e) => {
+            e.stopPropagation();
+            this.onNodeEdit(node);
+          });
+        } else {
+          // viewOnly: cursor "grab" para indicar que se puede mover,
+          // pero sin click-to-link ni edición.
+          group.style.cursor = "grab";
+        }
       } else {
-        // En modo readonly el cursor no muestra "grab"; aún así dejamos
-        // que el doble click abra un detalle (sin permitir editar).
+        // readonly puro: sin interacción alguna
         group.style.cursor = "default";
       }
 

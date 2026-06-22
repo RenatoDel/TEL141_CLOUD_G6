@@ -90,14 +90,11 @@ export async function renderSliceDetail(container, { name }) {
     return;
   }
 
-  // ─── Topología (canvas readonly) + resumen de Internet ───────────────
-  container.append(renderTopologyAndSummary(slice, vms));
-
-  // ─── Lista de VMs ────────────────────────────────────────────────────
+  // ─── Lista de VMs (primero) ─────────────────────────────────────────
   container.append(
     h(
       "h2",
-      { style: "font-size:1rem;margin:1.5rem 0 0.75rem;color:var(--text)" },
+      { style: "font-size:1rem;margin:0 0 0.75rem;color:var(--text)" },
       "Máquinas virtuales"
     )
   );
@@ -106,6 +103,16 @@ export async function renderSliceDetail(container, { name }) {
     grid.append(renderVmCard(slice, vm));
   }
   container.append(grid);
+
+  // ─── Topología + resumen (debajo de las VMs) ─────────────────────────
+  container.append(
+    h(
+      "h2",
+      { style: "font-size:1rem;margin:1.5rem 0 0.75rem;color:var(--text)" },
+      "Topología del slice"
+    )
+  );
+  container.append(renderTopologyAndSummary(slice, vms));
 }
 
 /**
@@ -150,7 +157,7 @@ function renderTopologyAndSummary(slice, vms) {
     canvasCol.append(svgWrap);
 
     // Crear el canvas en modo readonly y cargarle el grafo
-    const canvas = new TopologyCanvas(svg, { readonly: true });
+    const canvas = new TopologyCanvas(svg, { viewOnly: true });
 
     // Adaptar las VMs a la forma {name, internet, ...} que espera loadFromGraph
     const nodes = vms.map((vm) => ({
