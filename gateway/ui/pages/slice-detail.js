@@ -5,6 +5,10 @@
  * (start/stop/reboot) si el usuario tiene permiso de escritura, y acceso
  * a la consola VNC de cada VM vía un canvas RFB minimalista por websocket.
  *
+ * También muestra la topología del slice en modo solo-lectura (canvas SVG
+ * sin permitir drag, edit, ni delete) y un resumen de qué VMs tienen
+ * salida a Internet habilitada.
+ *
  * Nota sobre la consola VNC: implementar el protocolo RFB completo está
  * fuera de alcance razonable para este módulo. En su lugar, abrimos el
  * websocket del proxy (gateway /ws/vnc-proxy) y mostramos al usuario el
@@ -15,6 +19,7 @@
  */
 
 import { SliceApi } from "../lib/api.js";
+import { TopologyCanvas } from "../lib/topology-canvas.js";
 import { h, statusBadge, showError, showToast, confirmDialog } from "../lib/components.js";
 import { canWrite, getToken } from "../lib/auth.js";
 import { navigate } from "../lib/router.js";
@@ -85,6 +90,17 @@ export async function renderSliceDetail(container, { name }) {
     return;
   }
 
+  // ─── Topología (canvas readonly) + resumen de Internet ───────────────
+  container.append(renderTopologyAndSummary(slice, vms));
+
+  // ─── Lista de VMs ────────────────────────────────────────────────────
+  container.append(
+    h(
+      "h2",
+      { style: "font-size:1rem;margin:1.5rem 0 0.75rem;color:var(--text)" },
+      "Máquinas virtuales"
+    )
+  );
   const grid = h("div", { class: "card-grid" });
   for (const vm of vms) {
     grid.append(renderVmCard(slice, vm));
@@ -92,14 +108,181 @@ export async function renderSliceDetail(container, { name }) {
   container.append(grid);
 }
 
+/**
+ * Renderiza el bloque superior con dos columnas:
+ *   - Izquierda: canvas SVG con la topología (readonly)
+ *   - Derecha: resumen (VMs totales, con internet, links, cluster)
+ *
+ * Si el slice no tiene links (raro pero posible), oculta el canvas y solo
+ * muestra el resumen.
+ */
+function renderTopologyAndSummary(slice, vms) {
+  // El grid se apila a 1 columna en pantallas <800px usando minmax/auto-fit.
+  // En escritorio queda como 2fr/1fr (canvas a la izquierda, resumen a la derecha).
+  const wrap = h("div", {
+    class: "card",
+    style:
+      "display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:16px;align-items:stretch",
+  });
+
+  // ─── Columna izquierda: canvas readonly ─────────────────────────────
+  const canvasCol = h("div", { style: "min-width:0" });
+  canvasCol.append(
+    h(
+      "h3",
+      { style: "margin:0 0 8px;font-size:0.92rem;color:var(--text)" },
+      "Topología"
+    )
+  );
+
+  const links = slice.links || [];
+  const hasGraph = links.length > 0;
+
+  if (hasGraph) {
+    const svgWrap = h("div", {
+      class: "topo-svg-scroll",
+      style:
+        "background:var(--bg);border-radius:6px;border:1px solid var(--border);max-height:380px;overflow:auto",
+    });
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "topo-svg");
+    svgWrap.append(svg);
+    canvasCol.append(svgWrap);
+
+    // Crear el canvas en modo readonly y cargarle el grafo
+    const canvas = new TopologyCanvas(svg, { readonly: true });
+
+    // Adaptar las VMs a la forma {name, internet, ...} que espera loadFromGraph
+    const nodes = vms.map((vm) => ({
+      name: vm.name,
+      internet: !!vm.internet,
+      vcpus: vm.vcpus,
+      ram_mb: vm.ram_mb,
+      disk_gb: vm.disk_gb,
+      image_name: vm.image_name,
+    }));
+
+    // Los links del slice ya vienen como [{id, from, to, vlan_id}], compatible
+    canvas.loadFromGraph(nodes, links);
+  } else {
+    canvasCol.append(
+      h(
+        "p",
+        { class: "text-faint", style: "font-size:0.78rem;margin:8px 0" },
+        "Este slice no tiene enlaces declarados."
+      )
+    );
+  }
+
+  // ─── Columna derecha: resumen rápido ────────────────────────────────
+  const internetVms = vms.filter((v) => v.internet);
+  const runningVms = vms.filter((v) => (v.status || "").toLowerCase() === "running");
+
+  const summary = h(
+    "div",
+    {
+      style:
+        "display:flex;flex-direction:column;gap:8px;font-size:0.82rem;color:var(--text-dim)",
+    },
+    h(
+      "h3",
+      { style: "margin:0 0 4px;font-size:0.92rem;color:var(--text)" },
+      "Resumen"
+    ),
+    summaryRow("Cluster", slice.cluster || "linux"),
+    summaryRow("VMs totales", String(vms.length)),
+    summaryRow("VMs running", `${runningVms.length}/${vms.length}`),
+    summaryRow("Enlaces", String(links.length)),
+    summaryRow("VLAN base", slice.vlan_base != null ? String(slice.vlan_base) : "—"),
+    summaryRow(
+      "Modo internet",
+      slice.internet_mode === "headnode_nat"
+        ? "Headnode NAT"
+        : slice.internet_mode === "provider_network"
+        ? "Provider network"
+        : "Ninguno"
+    )
+  );
+
+  // Lista de VMs con internet (si hay alguna)
+  if (internetVms.length > 0) {
+    summary.append(
+      h(
+        "div",
+        {
+          style:
+            "margin-top:6px;padding:8px 10px;background:rgba(94,234,212,0.08);border-radius:6px;border:1px solid rgba(94,234,212,0.25)",
+        },
+        h(
+          "div",
+          {
+            style:
+              "font-size:0.72rem;color:#5eead4;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.04em",
+          },
+          "Con acceso a Internet"
+        ),
+        ...internetVms.map((vm) =>
+          h(
+            "div",
+            { class: "mono", style: "font-size:0.78rem;color:var(--text);line-height:1.5" },
+            `· ${vm.name}` +
+              (vm.external_ip ? ` → ${vm.external_ip}` : "")
+          )
+        )
+      )
+    );
+  } else {
+    summary.append(
+      h(
+        "div",
+        {
+          style:
+            "margin-top:6px;padding:8px 10px;background:var(--bg);border-radius:6px;border:1px dashed var(--border);font-size:0.76rem;color:var(--text-faint)",
+        },
+        "Ninguna VM tiene salida a Internet en este slice."
+      )
+    );
+  }
+
+  wrap.append(canvasCol, summary);
+  return wrap;
+}
+
+function summaryRow(label, value) {
+  return h(
+    "div",
+    { class: "flex justify-between", style: "padding:2px 0" },
+    h("span", {}, label),
+    h("span", { class: "mono", style: "color:var(--text)" }, value)
+  );
+}
+
 function renderVmCard(slice, vm) {
+  // Badge de internet (pequeño, al lado del estado)
+  const internetBadge = vm.internet
+    ? h(
+        "span",
+        {
+          style:
+            "background:rgba(94,234,212,0.15);color:#5eead4;font-size:0.66rem;padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em;margin-left:6px",
+          title: "Esta VM tiene salida a Internet",
+        },
+        "🌐 internet"
+      )
+    : null;
+
   const card = h(
     "div",
     { class: "card" },
     h(
       "div",
       { class: "flex justify-between items-center" },
-      h("h3", { class: "mono", style: "margin:0" }, vm.name),
+      h(
+        "div",
+        { class: "flex items-center" },
+        h("h3", { class: "mono", style: "margin:0" }, vm.name),
+        internetBadge
+      ),
       statusBadge(vm.status)
     ),
     h(
@@ -108,6 +291,8 @@ function renderVmCard(slice, vm) {
       detailRow("Worker", vm.server || vm.worker || "—"),
       detailRow("vCPUs", vm.vcpus ?? "—"),
       detailRow("RAM", vm.ram_mb ? `${vm.ram_mb} MB` : "—"),
+      detailRow("Disco", vm.disk_gb ? `${vm.disk_gb} GB` : "—"),
+      vm.image_name ? detailRow("Imagen", vm.image_name) : null,
       vm.vnc_port ? detailRow("VNC port", vm.vnc_port) : null,
       vm.external_ip ? detailRow("IP externa", vm.external_ip) : null
     )

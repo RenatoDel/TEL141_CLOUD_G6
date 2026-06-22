@@ -36,10 +36,15 @@ function _nextLinkId(existingIds) {
 }
 
 export class TopologyCanvas {
-  constructor(svgEl, { onChange, onNodeEdit } = {}) {
+  constructor(svgEl, { onChange, onNodeEdit, readonly = false } = {}) {
     this.svg = svgEl;
     this.onChange = onChange || (() => {});
     this.onNodeEdit = onNodeEdit || (() => {});
+    // readonly: cuando es true, el canvas solo dibuja la topología sin
+    // permitir interacción (drag, click-to-link, eliminar enlaces, doble
+    // click para editar). Usado por slice-detail.js para mostrar la
+    // topología desplegada en modo solo-lectura.
+    this.readonly = readonly;
 
     this.nodes = []; // {name, x, y, vcpus, ram_mb, disk_gb, image_name, internet, preferred_worker}
     this.links = []; // {id, from_node, to_node}
@@ -334,22 +339,27 @@ export class TopologyCanvas {
         x1: from.x, y1: from.y, x2: to.x, y2: to.y,
         class: "topo-link",
       });
-      line.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.removeLink(link.id);
-      });
+      if (!this.readonly) {
+        line.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.removeLink(link.id);
+        });
+      }
       this.linksLayer.append(line);
 
-      const midX = (from.x + to.x) / 2;
-      const midY = (from.y + to.y) / 2;
-      const delBtn = this._svgEl("circle", {
-        cx: midX, cy: midY, r: 7, class: "topo-link-delete",
-      });
-      delBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.removeLink(link.id);
-      });
-      this.linksLayer.append(delBtn);
+      // En modo readonly no mostramos el botón de borrar enlace
+      if (!this.readonly) {
+        const midX = (from.x + to.x) / 2;
+        const midY = (from.y + to.y) / 2;
+        const delBtn = this._svgEl("circle", {
+          cx: midX, cy: midY, r: 7, class: "topo-link-delete",
+        });
+        delBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.removeLink(link.id);
+        });
+        this.linksLayer.append(delBtn);
+      }
     }
 
     for (const node of this.nodes) {
@@ -374,19 +384,25 @@ export class TopologyCanvas {
 
       group.append(circle, label);
 
-      group.addEventListener("pointerdown", (e) => {
-        e.stopPropagation();
-        this.dragState = { name: node.name, moved: false };
-      });
-      group.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (this.dragState && this.dragState.moved) return;
-        this._handleNodeClick(node.name);
-      });
-      group.addEventListener("dblclick", (e) => {
-        e.stopPropagation();
-        this.onNodeEdit(node);
-      });
+      if (!this.readonly) {
+        group.addEventListener("pointerdown", (e) => {
+          e.stopPropagation();
+          this.dragState = { name: node.name, moved: false };
+        });
+        group.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (this.dragState && this.dragState.moved) return;
+          this._handleNodeClick(node.name);
+        });
+        group.addEventListener("dblclick", (e) => {
+          e.stopPropagation();
+          this.onNodeEdit(node);
+        });
+      } else {
+        // En modo readonly el cursor no muestra "grab"; aún así dejamos
+        // que el doble click abra un detalle (sin permitir editar).
+        group.style.cursor = "default";
+      }
 
       this.nodesLayer.append(group);
     }
