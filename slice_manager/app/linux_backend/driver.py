@@ -1167,6 +1167,10 @@ class LinuxDriver:
         if action not in {"start", "stop", "reboot", "pause", "resume"}:
             raise ValueError(f"Acción no soportada: {action}")
 
+        # slice_id es necesario para que vm_manager encuentre los paths
+        # correctos (launcher, pid, monitor) que tienen el formato
+        # "{slice_id}--{vm_name}.sh". Sin él busca "vm1.sh" en vez de
+        # "test-linux-01--vm1.sh" y lanza FileNotFoundError.
         slice_id = vm.get("slice_id", "")
 
         with self._worker_client(vm["server"]) as client:
