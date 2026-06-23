@@ -1,0 +1,32 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'node']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 1h
+  receiver: 'log-only'
+  routes:
+    - matchers:
+        - severity = critical
+      receiver: 'log-only'
+      repeat_interval: 15m
+
+receivers:
+  - name: 'log-only'
+    # Alertas visibles en http://<IP>:9093
+    # Para agregar email descomenta esto:
+    # email_configs:
+    #   - to: 'tu-email@pucp.edu.pe'
+    #     from: 'alertas@pucp.edu.pe'
+    #     smarthost: 'smtp.gmail.com:587'
+    #     auth_username: 'tu-email@gmail.com'
+    #     auth_password: 'tu-app-password'
+
+inhibit_rules:
+  - source_matchers:
+      - severity = critical
+    target_matchers:
+      - severity = warning
+    equal: ['node']

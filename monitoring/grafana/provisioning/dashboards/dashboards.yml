@@ -3,9 +3,10 @@ apiVersion: 1
 providers:
   - name: PUCP Cloud Dashboards
     orgId: 1
-    folder: ""
+    folder: "PUCP Cloud"
     type: file
     disableDeletion: false
     editable: true
+    updateIntervalSeconds: 30
     options:
-      path: /var/lib/grafana/dashboards
+      path: /etc/grafana/provisioning/dashboards

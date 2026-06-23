@@ -1,0 +1,51 @@
+groups:
+  - name: pucp_cluster
+    interval: 30s
+    rules:
+
+      - alert: WorkerCPUAlta
+        expr: >
+          (1 - avg by (node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker {{ $labels.node }}: CPU > 85%"
+          description: "CPU sostenida por más de 5 minutos."
+
+      - alert: WorkerRAMAlta
+        expr: >
+          (1 - (
+            node_memory_MemAvailable_bytes
+            /
+            node_memory_MemTotal_bytes
+          )) > 0.90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker {{ $labels.node }}: RAM > 90%"
+          description: "Uso de memoria sostenido por más de 5 minutos."
+
+      - alert: WorkerDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker caído: {{ $labels.node }}"
+          description: "El target {{ $labels.node }} lleva más de 1 minuto sin responder."
+
+      - alert: DiskoCasiLleno
+        expr: >
+          (1 - (
+            node_filesystem_avail_bytes{mountpoint="/"}
+            /
+            node_filesystem_size_bytes{mountpoint="/"}
+          )) > 0.85
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disco > 85% en {{ $labels.node }}"
+          description: "El disco raíz está casi lleno."
