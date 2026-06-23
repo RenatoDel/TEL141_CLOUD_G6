@@ -18,7 +18,7 @@ scrape_configs:
       - targets: ['host.docker.internal:9100']
         labels:
           node: server4-headnode
-    relabel_configs:
+    metric_relabel_configs:
       - source_labels: [node]
         target_label: nodename
 
@@ -33,7 +33,7 @@ scrape_configs:
       - targets: ['10.0.10.3:9100']
         labels:
           node: server3
-    relabel_configs:
+    metric_relabel_configs:
       - source_labels: [node]
         target_label: nodename
 
