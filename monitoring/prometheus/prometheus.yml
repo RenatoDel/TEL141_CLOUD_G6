@@ -6,50 +6,40 @@ rule_files:
   - "/etc/prometheus/alerts.yml"
 
 scrape_configs:
-  - job_name: node
+  # Cluster Linux: server1, server2, server3 (via túneles SSH 9101-9103)
+  - job_name: node_exporter_linux
     static_configs:
       - targets: ['localhost:9101']
         labels:
           node: server1
           nodename: server1
+          cluster: linux
       - targets: ['localhost:9102']
         labels:
           node: server2
           nodename: server2
+          cluster: linux
       - targets: ['localhost:9103']
         labels:
           node: server3
           nodename: server3
+          cluster: linux
+
+  # Cluster OpenStack: worker1, worker2, worker3 (via túneles SSH 9122-9124)
+  - job_name: node_exporter_openstack
+    static_configs:
       - targets: ['localhost:9122']
         labels:
           node: worker1
           nodename: worker1
+          cluster: openstack
       - targets: ['localhost:9123']
         labels:
           node: worker2
           nodename: worker2
+          cluster: openstack
       - targets: ['localhost:9124']
         labels:
           node: worker3
           nodename: worker3
-
-  - job_name: node_exporter_workers
-    static_configs:
-      - targets: ['10.0.10.1:9100']
-        labels:
-          node: server1
-      - targets: ['10.0.10.2:9100']
-        labels:
-          node: server2
-      - targets: ['10.0.10.3:9100']
-        labels:
-          node: server3
-    metric_relabel_configs:
-      - source_labels: [node]
-        target_label: nodename
-
-  - job_name: prometheus
-    static_configs:
-      - targets: ['prometheus:9090']
-        labels:
-          node: prometheus
+          cluster: openstack
