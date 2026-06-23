@@ -772,6 +772,20 @@ async function handleSubmit({ canvas, nameInput, clusterInput, ownerSelect, cour
   }
 
   const nodes = canvas.toPayloadNodes();
+  const nodeNames = new Set(nodes.map(n => n.name));
+
+  // Filtrar links que referencien nodos borrados (p.ej. al borrar un nodo
+  // manualmente sin borrar sus enlaces, o al aplicar plantilla y luego
+  // borrar nodos). El backend rechaza con 422 si hay links huérfanos.
+  const rawLinks = canvas.toPayloadLinks();
+  const links = rawLinks.filter(l => nodeNames.has(l.from) && nodeNames.has(l.to));
+  if (links.length < rawLinks.length) {
+    const dropped = rawLinks.length - links.length;
+    showToast(
+      `Se ignoraron ${dropped} enlace(s) que apuntaban a nodos eliminados.`,
+      "info"
+    );
+  }
 
   // Si algún nodo tiene internet:true, activar headnode_nat automáticamente.
   // Sin este campo el backend usa "none" y nunca crea la interfaz de salida.
@@ -782,7 +796,7 @@ async function handleSubmit({ canvas, nameInput, clusterInput, ownerSelect, cour
     // vlan_base omitido → el backend asigna automáticamente la siguiente libre
     cluster,
     nodes,
-    links: canvas.toPayloadLinks(),
+    links,
     internet_mode: hasInternet ? "headnode_nat" : "none",
   };
 
