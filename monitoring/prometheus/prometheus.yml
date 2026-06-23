@@ -2,25 +2,36 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
-# Reglas de alerta
 rule_files:
   - "/etc/prometheus/alerts.yml"
 
-# Alertmanager (descomenta cuando lo levantes)
-# alerting:
-#   alertmanagers:
-#     - static_configs:
-#         - targets: ['alertmanager:9093']
-
 scrape_configs:
-  - job_name: node_exporter_headnode
+  - job_name: node
     static_configs:
-      - targets: ['host.docker.internal:9100']
+      - targets: ['localhost:9101']
         labels:
-          node: server4-headnode
-    metric_relabel_configs:
-      - source_labels: [node]
-        target_label: nodename
+          node: server1
+          nodename: server1
+      - targets: ['localhost:9102']
+        labels:
+          node: server2
+          nodename: server2
+      - targets: ['localhost:9103']
+        labels:
+          node: server3
+          nodename: server3
+      - targets: ['localhost:9122']
+        labels:
+          node: worker1
+          nodename: worker1
+      - targets: ['localhost:9123']
+        labels:
+          node: worker2
+          nodename: worker2
+      - targets: ['localhost:9124']
+        labels:
+          node: worker3
+          nodename: worker3
 
   - job_name: node_exporter_workers
     static_configs:
