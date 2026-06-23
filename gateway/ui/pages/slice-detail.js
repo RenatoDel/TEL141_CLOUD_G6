@@ -183,7 +183,9 @@ function renderTopologyAndSummary(slice, vms) {
 
   // ─── Columna derecha: resumen rápido ────────────────────────────────
   const internetVms = vms.filter((v) => v.internet);
-  const runningVms = vms.filter((v) => (v.status || "").toLowerCase() === "running");
+  // "running" = Linux cluster, "active" = OpenStack — ambos significan lo mismo
+  const RUNNING_STATES = new Set(["running", "active"]);
+  const runningVms = vms.filter((v) => RUNNING_STATES.has((v.status || "").toLowerCase()));
 
   const summary = h(
     "div",
@@ -301,6 +303,7 @@ function renderVmCard(slice, vm) {
       detailRow("Disco", vm.disk_gb ? `${vm.disk_gb} GB` : "—"),
       vm.image_name ? detailRow("Imagen", vm.image_name) : null,
       vm.vnc_port ? detailRow("VNC port", vm.vnc_port) : null,
+      vm.console_url ? detailRow("Consola", "noVNC (OpenStack)") : null,
       vm.external_ip ? detailRow("IP externa", vm.external_ip) : null
     )
   );
@@ -316,7 +319,12 @@ function renderVmCard(slice, vm) {
     card.append(actionsRow);
   }
 
-  if (vm.vnc_port && (vm.server || vm.worker)) {
+  // Botón de consola: Linux usa vnc_port via proxy SSH,
+  // OpenStack usa console_url directa de Horizon/Nova.
+  const hasLinuxVnc = vm.vnc_port && (vm.server || vm.worker);
+  const hasOsConsole = !!vm.console_url;
+
+  if (hasLinuxVnc || hasOsConsole) {
     card.append(
       h(
         "button",
@@ -382,16 +390,30 @@ async function handleDeleteSlice(sliceName) {
 }
 
 function openConsoleInfo(slice, vm) {
+  // ── OpenStack: console_url directa de Nova/Horizon ──────────────────
+  // La URL apunta a http://controller:6080/vnc_auto.html — no es accesible
+  // directamente. El gateway expone un proxy en /openstack-vnc que redirige
+  // al controller a través del túnel SSH.
+  if (vm.console_url) {
+    // Reemplazar "http://controller:6080" por el proxy del gateway
+    const proxied = vm.console_url.replace(
+      /^https?:\/\/[^/]+/,
+      `${window.location.origin}/openstack-vnc`
+    );
+    window.open(proxied, "_blank", "noopener");
+    return;
+  }
+
+  // ── Linux: proxy WebSocket del gateway → SSH → QEMU VNC ─────────────
   const worker = vm.server || vm.worker;
   const token  = getToken();
   const vmName = vm.name;
 
-  // Construir URL hacia la página vnc-viewer.html que carga noVNC
   const params = new URLSearchParams({
     worker,
-    port:  vm.vnc_port,
+    port: vm.vnc_port,
     token,
-    vm:    vmName,
+    vm:   vmName,
   });
   const viewerUrl = `${window.location.origin}/vnc-viewer.html?${params.toString()}`;
   window.open(viewerUrl, "_blank", "noopener");

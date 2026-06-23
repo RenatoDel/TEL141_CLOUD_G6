@@ -618,6 +618,74 @@ async def ws_vnc_proxy(websocket: WebSocket):
             await websocket.close()
 
 
+# ── Proxy para consola VNC de OpenStack ─────────────────────────────────
+# Las VMs de OpenStack tienen una console_url del tipo:
+#   http://controller:6080/vnc_auto.html?path=%3Ftoken%3DXXX
+# "controller" es accesible desde app (host) vía túnel SSH en localhost:6080,
+# pero NO desde el navegador del usuario. Este proxy reenvía las peticiones
+# HTTP y WebSocket de /openstack-vnc/* al controller:6080 a través del host.
+#
+# El túnel está activo mientras ~/start_tunnels.sh esté corriendo:
+#   ssh -NL 0.0.0.0:6080:192.168.202.1:6080 ubuntu@10.20.11.189 -p 5821 &
+#
+# NOTA: el túnel de puerto 6080 puede que no esté en start_tunnels.sh aún.
+# Si falla, agregar esta línea a start_tunnels.sh:
+#   ssh -NL 0.0.0.0:6080:192.168.202.1:6080 ubuntu@10.20.11.189 -p 5821 &
+
+OS_NOVNC_URL = os.getenv("OS_NOVNC_URL", "http://172.17.0.1:6080")
+
+
+@app.api_route(
+    "/openstack-vnc/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+)
+async def proxy_openstack_vnc(path: str, request: Request):
+    """
+    Proxy transparente hacia el noVNC de Nova (controller:6080).
+    El navegador accede a /openstack-vnc/vnc_auto.html?... y este
+    endpoint lo reenvía a http://172.17.0.1:6080/vnc_auto.html?...
+    """
+    target = f"{OS_NOVNC_URL}/{path}"
+    qs = request.url.query
+    if qs:
+        target = f"{target}?{qs}"
+
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in ("host", "content-length")
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            body = await request.body()
+            resp = await client.request(
+                method=request.method,
+                url=target,
+                headers=headers,
+                content=body,
+            )
+        # Filtrar headers que httpx no puede pasar tal cual
+        resp_headers = {
+            k: v for k, v in resp.headers.items()
+            if k.lower() not in ("transfer-encoding", "connection")
+        }
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=resp_headers,
+            media_type=resp.headers.get("content-type"),
+        )
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "No se puede conectar al noVNC de OpenStack (controller:6080). "
+                "Verifica que el túnel SSH esté activo: "
+                "ssh -NL 0.0.0.0:6080:192.168.202.1:6080 ubuntu@10.20.11.189 -p 5821 &"
+            ),
+        )
+
+
 UI_DIR = Path("/app/ui")
 
 if UI_DIR.exists():
