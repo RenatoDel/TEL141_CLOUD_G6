@@ -618,6 +618,91 @@ async def ws_vnc_proxy(websocket: WebSocket):
             await websocket.close()
 
 
+# ── Proxy WebSocket para noVNC de OpenStack ─────────────────────────────
+# noVNC construye el WebSocket como ws://<misma-origin>/websockify?token=XXX
+# Este endpoint lo captura y lo reenvía al controller:6080/websockify
+# a través del túnel SSH (0.0.0.0:6080 → 192.168.202.1:6080 vía puerto 5821).
+
+OS_WEBSOCKIFY_HOST = os.getenv("OS_WEBSOCKIFY_HOST", "172.17.0.1")
+OS_WEBSOCKIFY_PORT = int(os.getenv("OS_WEBSOCKIFY_PORT", "6080"))
+
+
+@app.websocket("/websockify")
+async def ws_websockify_proxy(websocket: WebSocket):
+    """
+    Proxy WebSocket transparente hacia el websockify de Nova.
+    noVNC abre ws://<origin>/websockify?token=XXX → aquí → ws://172.17.0.1:6080/websockify?token=XXX
+    """
+    import websockets  # type: ignore
+
+    qs = websocket.url.query
+    target_url = f"ws://{OS_WEBSOCKIFY_HOST}:{OS_WEBSOCKIFY_PORT}/websockify"
+    if qs:
+        target_url = f"{target_url}?{qs}"
+
+    # noVNC requiere el subprotocolo "binary" igual que para Linux VNC
+    requested = websocket.headers.get("sec-websocket-protocol", "")
+    subprotocol = "binary" if "binary" in requested else None
+
+    await websocket.accept(subprotocol=subprotocol)
+    logger.info("OpenStack VNC WebSocket: %s", target_url)
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_event_loop()
+
+    try:
+        extra_headers = {}
+        if subprotocol:
+            extra_headers["Sec-WebSocket-Protocol"] = subprotocol
+
+        async with websockets.connect(
+            target_url,
+            subprotocols=["binary"] if subprotocol else [],
+            extra_headers=extra_headers,
+            max_size=10 * 1024 * 1024,
+            ping_interval=20,
+            ping_timeout=20,
+        ) as nova_ws:
+
+            async def client_to_nova():
+                try:
+                    while not stop_event.is_set():
+                        msg = await websocket.receive()
+                        if msg["type"] == "websocket.disconnect":
+                            stop_event.set()
+                            break
+                        data = msg.get("bytes") or (msg.get("text") or "").encode("latin-1")
+                        if data:
+                            await nova_ws.send(data)
+                except Exception:
+                    stop_event.set()
+
+            async def nova_to_client():
+                try:
+                    async for msg in nova_ws:
+                        if stop_event.is_set():
+                            break
+                        if isinstance(msg, bytes):
+                            await websocket.send_bytes(msg)
+                        else:
+                            await websocket.send_text(msg)
+                except Exception:
+                    stop_event.set()
+
+            t1 = asyncio.create_task(client_to_nova())
+            t2 = asyncio.create_task(nova_to_client())
+            done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+            stop_event.set()
+            for t in pending:
+                t.cancel()
+
+    except Exception as exc:
+        logger.warning("OpenStack VNC proxy error: %s", exc)
+    finally:
+        with contextlib.suppress(Exception):
+            await websocket.close()
+
+
 # ── Proxy para consola VNC de OpenStack ─────────────────────────────────
 # Las VMs de OpenStack tienen una console_url del tipo:
 #   http://controller:6080/vnc_auto.html?path=%3Ftoken%3DXXX
