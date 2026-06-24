@@ -389,29 +389,26 @@ async function handleDeleteSlice(sliceName) {
   }
 }
 
-function openConsoleInfo(slice, vm) {
-  // ── OpenStack: console_url directa de Nova/Horizon ──────────────────
-  // La URL apunta a http://controller:6080/vnc_auto.html — no es accesible
-  // directamente. El gateway expone un proxy en /openstack-vnc que redirige
-  // al controller a través del túnel SSH.
-  if (vm.console_url) {
-    // La console_url tiene la forma:
+async function openConsoleInfo(slice, vm) {
+  // Pedir siempre una URL fresca al backend para evitar tokens expirados.
+  // Para OpenStack: Nova genera un token nuevo (válido ~10 min).
+  // Para Linux: devuelve el worker y vnc_port para el proxy WebSocket.
+  let consoleInfo;
+  try {
+    consoleInfo = await SliceApi.getVmConsole(slice.slice_name, vm.name);
+  } catch (err) {
+    showError(err);
+    return;
+  }
+
+  if (consoleInfo.type === "openstack") {
+    // La console_url fresca tiene la forma:
     //   http://controller:6080/vnc_auto.html?path=%3Ftoken%3DXXX
-    // donde path decodificado es "?token=XXX".
-    //
-    // noVNC toma ese path y abre el WebSocket como:
-    //   ws://<origin>/<path>  → ws://<origin>/?token=XXX
-    //
-    // FastAPI no puede registrar WebSocket en "/" (colisiona con HTTP).
-    // Solución: reescribir el path a "ws-novnc%3Ftoken%3DXXX" para que
-    // noVNC conecte a ws://<origin>/ws-novnc?token=XXX, que sí existe.
-    const url = new URL(vm.console_url);
+    // Reescribimos el path para que noVNC conecte a /ws-novnc?token=XXX
+    const url = new URL(consoleInfo.console_url);
     const rawPath = url.searchParams.get("path") || "";
-    // rawPath es algo como "?token=XXX" — lo cambiamos a "ws-novnc?token=XXX"
     const newPath = rawPath.replace(/^\?/, "ws-novnc?");
     url.searchParams.set("path", newPath);
-
-    // Reemplazar el host controller:6080 por el proxy del gateway
     const proxied = url.toString().replace(
       /^https?:\/\/[^/]+/,
       `${window.location.origin}/openstack-vnc`
@@ -420,17 +417,11 @@ function openConsoleInfo(slice, vm) {
     return;
   }
 
-  // ── Linux: proxy WebSocket del gateway → SSH → QEMU VNC ─────────────
-  const worker = vm.server || vm.worker;
-  const token  = getToken();
-  const vmName = vm.name;
-
-  const params = new URLSearchParams({
-    worker,
-    port: vm.vnc_port,
-    token,
-    vm:   vmName,
-  });
+  // Linux: proxy WebSocket del gateway → SSH → QEMU VNC
+  const worker  = consoleInfo.worker || vm.server || vm.worker;
+  const port    = consoleInfo.vnc_port || vm.vnc_port;
+  const token   = getToken();
+  const params  = new URLSearchParams({ worker, port, token, vm: vm.name });
   const viewerUrl = `${window.location.origin}/vnc-viewer.html?${params.toString()}`;
   window.open(viewerUrl, "_blank", "noopener");
 }

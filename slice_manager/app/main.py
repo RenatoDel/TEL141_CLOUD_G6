@@ -423,3 +423,51 @@ async def action_graph_vm(
         "vm_name": vm_name,
         "result": result,
     }
+
+@app.get("/graph-vms/{slice_name}/{vm_name}/console")
+async def get_vm_console(
+    slice_name: str,
+    vm_name: str,
+    user: dict = Depends(require_token),
+):
+    """
+    Obtiene una URL de consola VNC fresca para una VM de OpenStack.
+    Los tokens de consola de Nova expiran en ~10 minutos, por lo que
+    hay que pedirle uno nuevo a Nova cada vez que el usuario abre la consola.
+    Para VMs Linux (QEMU), devuelve la URL del proxy WebSocket del gateway.
+    """
+    found = get_slice(slice_name)
+    if not found:
+        raise HTTPException(status_code=404, detail="Graph slice no encontrado")
+    assert_can_view(user, found)
+
+    vm = next(
+        (v for v in found.get("vms", []) if v.get("name") == vm_name),
+        None,
+    )
+    if vm is None:
+        raise HTTPException(status_code=404, detail="VM no encontrada")
+
+    # VM de OpenStack: pedir token fresco a Nova
+    if vm.get("openstack_id"):
+        project_id = vm.get("project_id")
+        if not project_id:
+            raise HTTPException(status_code=500, detail="VM sin project_id")
+        try:
+            from .openstack_backend.driver import OpenStackDriver
+            driver = OpenStackDriver()
+            scoped_token = driver.client.get_scoped_token(project_id)
+            url = driver.client.get_console_url(vm["openstack_id"], scoped_token)
+            if not url:
+                raise HTTPException(status_code=502, detail="Nova no devolvió URL de consola")
+            return {"type": "openstack", "console_url": url}
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Error obteniendo consola: {exc}") from exc
+
+    # VM Linux (QEMU): devolver info para el proxy WebSocket
+    return {
+        "type": "linux",
+        "worker": vm.get("server") or vm.get("worker"),
+        "vnc_port": vm.get("vnc_port"),
+    }
+

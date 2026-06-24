@@ -146,6 +146,12 @@ export const SliceApi = {
       { method: "POST", body: { action } }
     ),
 
+  /** Obtiene URL de consola fresca desde Nova (token nuevo cada vez). */
+  getVmConsole: (sliceName, vmName) =>
+    request(
+      `/api/graph-vms/${encodeURIComponent(sliceName)}/${encodeURIComponent(vmName)}/console`
+    ),
+
   monitoringSummary: () => request("/api/monitoring/summary"),
 
   /** Resumen por curso (para profesor/coach) — slices visibles agrupados. */
