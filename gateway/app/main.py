@@ -666,18 +666,17 @@ async def _ws_novnc_proxy(websocket: WebSocket):
     loop = asyncio.get_event_loop()
 
     try:
-        extra_headers = {}
+        # extra_headers no es compatible con todas las versiones de websockets.
+        # El subprotocolo se negocia vía el parámetro subprotocols.
+        connect_kwargs = {
+            "max_size": 10 * 1024 * 1024,
+            "ping_interval": 20,
+            "ping_timeout": 20,
+        }
         if subprotocol:
-            extra_headers["Sec-WebSocket-Protocol"] = subprotocol
+            connect_kwargs["subprotocols"] = ["binary"]
 
-        async with websockets.connect(
-            target_url,
-            subprotocols=["binary"] if subprotocol else [],
-            extra_headers=extra_headers,
-            max_size=10 * 1024 * 1024,
-            ping_interval=20,
-            ping_timeout=20,
-        ) as nova_ws:
+        async with websockets.connect(target_url, **connect_kwargs) as nova_ws:
 
             async def client_to_nova():
                 try:
