@@ -628,10 +628,25 @@ OS_WEBSOCKIFY_PORT = int(os.getenv("OS_WEBSOCKIFY_PORT", "6080"))
 
 
 @app.websocket("/websockify")
-async def ws_websockify_proxy(websocket: WebSocket):
+async def ws_websockify(websocket: WebSocket):
+    """noVNC moderno: ws://<origin>/websockify?token=XXX"""
+    await _ws_novnc_proxy(websocket)
+
+
+@app.websocket("/ws-novnc")
+async def ws_novnc_alias(websocket: WebSocket):
     """
-    Proxy WebSocket transparente hacia el websockify de Nova.
-    noVNC abre ws://<origin>/websockify?token=XXX → aquí → ws://172.17.0.1:6080/websockify?token=XXX
+    Nova legacy abre ws://<origin>/?token=XXX — FastAPI no puede registrar
+    WebSocket en / (colisiona con el catch-all HTTP), así que la UI redirige
+    el path / a /ws-novnc antes de conectar. Ver openConsoleInfo en slice-detail.js.
+    """
+    await _ws_novnc_proxy(websocket)
+
+
+async def _ws_novnc_proxy(websocket: WebSocket):
+    """
+    Proxy WebSocket compartido para noVNC de OpenStack.
+    Reenvía el stream RFB a ws://172.17.0.1:6080/websockify?token=XXX
     """
     import websockets  # type: ignore
 

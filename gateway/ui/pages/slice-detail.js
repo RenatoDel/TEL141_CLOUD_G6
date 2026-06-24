@@ -395,8 +395,24 @@ function openConsoleInfo(slice, vm) {
   // directamente. El gateway expone un proxy en /openstack-vnc que redirige
   // al controller a través del túnel SSH.
   if (vm.console_url) {
-    // Reemplazar "http://controller:6080" por el proxy del gateway
-    const proxied = vm.console_url.replace(
+    // La console_url tiene la forma:
+    //   http://controller:6080/vnc_auto.html?path=%3Ftoken%3DXXX
+    // donde path decodificado es "?token=XXX".
+    //
+    // noVNC toma ese path y abre el WebSocket como:
+    //   ws://<origin>/<path>  → ws://<origin>/?token=XXX
+    //
+    // FastAPI no puede registrar WebSocket en "/" (colisiona con HTTP).
+    // Solución: reescribir el path a "ws-novnc%3Ftoken%3DXXX" para que
+    // noVNC conecte a ws://<origin>/ws-novnc?token=XXX, que sí existe.
+    const url = new URL(vm.console_url);
+    const rawPath = url.searchParams.get("path") || "";
+    // rawPath es algo como "?token=XXX" — lo cambiamos a "ws-novnc?token=XXX"
+    const newPath = rawPath.replace(/^\?/, "ws-novnc?");
+    url.searchParams.set("path", newPath);
+
+    // Reemplazar el host controller:6080 por el proxy del gateway
+    const proxied = url.toString().replace(
       /^https?:\/\/[^/]+/,
       `${window.location.origin}/openstack-vnc`
     );
