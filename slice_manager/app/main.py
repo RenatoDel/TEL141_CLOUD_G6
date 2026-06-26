@@ -136,7 +136,7 @@ async def monitoring_summary(_user=Depends(current_user)):
                 }
         conn.close()
     except Exception as e:
-        logger.warning("No se pudo leer recursos reservados de MariaDB: %s", e)
+        import logging; logging.getLogger(__name__).warning("No se pudo leer recursos reservados de MariaDB: %s", e)
     db_disk = {k: {"total": v["disk_total_gb"], "reserved": v["disk_reserved_gb"]}
                for k, v in db_resources.items()}
 
@@ -517,4 +517,3 @@ async def get_vm_console(
         "worker": vm.get("server") or vm.get("worker"),
         "vnc_port": vm.get("vnc_port"),
     }
-
