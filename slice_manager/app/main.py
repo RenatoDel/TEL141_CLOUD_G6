@@ -105,6 +105,41 @@ async def monitoring_summary(_user=Depends(current_user)):
         ("worker2", "openstack"),
         ("worker3", "openstack"),
     ]
+    # Leer recursos reservados de MariaDB para cada worker.
+    # vcpus_used, ram_used_mb, storage_used_gb = lo que el orquestador comprometió.
+    # Distinto del uso físico real que reporta Prometheus.
+    db_resources = {}
+    try:
+        import pymysql, os as _os
+        conn = pymysql.connect(
+            host=_os.getenv("DB_HOST", "mariadb"),
+            port=int(_os.getenv("DB_PORT", 3306)),
+            user=_os.getenv("DB_USER", "pucp"),
+            password=_os.getenv("DB_PASS", "pucp_pass"),
+            database=_os.getenv("DB_NAME", "pucp_cloud"),
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT nombre, vcpus_total, vcpus_used,
+                          ram_total_mb, ram_used_mb,
+                          storage_total_gb, storage_used_gb
+                   FROM servidor_fisico WHERE activo=1"""
+            )
+            for row in cur.fetchall():
+                db_resources[row[0]] = {
+                    "vcpus_total":       row[1],
+                    "vcpus_reserved":    row[2],
+                    "ram_total_mb":      row[3],
+                    "ram_reserved_mb":   row[4],
+                    "disk_total_gb":     row[5],
+                    "disk_reserved_gb":  row[6],
+                }
+        conn.close()
+    except Exception as e:
+        logger.warning("No se pudo leer recursos reservados de MariaDB: %s", e)
+    db_disk = {k: {"total": v["disk_total_gb"], "reserved": v["disk_reserved_gb"]}
+               for k, v in db_resources.items()}
+
     workers = []
     for node, cluster in wanted:
         mem_total = results["mem_total"].get(node, 0.0)
@@ -115,6 +150,12 @@ async def monitoring_summary(_user=Depends(current_user)):
         mem_used = max(mem_total - mem_avail, 0.0)
         disk_used = max(disk_total - disk_avail, 0.0)
 
+        # Disco reservado según MariaDB (lo que el orquestador comprometió)
+        db_d = db_disk.get(node, {})
+        disk_reserved_gb = float(db_d.get("reserved", 0))
+        disk_capacity_gb = float(db_d.get("total", round(disk_total / (1024 ** 3), 2)))
+
+        db = db_resources.get(node, {})
         workers.append({
             "worker": node,
             "cluster": cluster,
@@ -126,6 +167,12 @@ async def monitoring_summary(_user=Depends(current_user)):
             "disk_total_gb": round(disk_total / (1024 ** 3), 2),
             "disk_used_gb": round(disk_used / (1024 ** 3), 2),
             "disk_free_gb": round(disk_avail / (1024 ** 3), 2),
+            # Recursos reservados por el orquestador (de MariaDB)
+            "vcpus_total":      db.get("vcpus_total"),
+            "vcpus_reserved":   db.get("vcpus_reserved", 0),
+            "ram_reserved_mb":  db.get("ram_reserved_mb", 0),
+            "disk_reserved_gb": disk_reserved_gb,
+            "disk_capacity_gb": disk_capacity_gb,
         })
 
     def _totals_for(ws):

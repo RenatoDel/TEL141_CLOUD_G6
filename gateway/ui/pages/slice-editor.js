@@ -50,11 +50,14 @@ const RAM_OPTIONS = [
 const VCPU_OPTIONS = [1, 2, 4, 8];
 
 const DISK_OPTIONS = [
-  { gb: 4,   label: "4 GB" },
-  { gb: 10,  label: "10 GB" },
-  { gb: 20,  label: "20 GB" },
-  { gb: 40,  label: "40 GB" },
-  { gb: 80,  label: "80 GB" },
+  { gb: 2,  label: "2 GB" },
+  { gb: 3,  label: "3 GB" },
+  { gb: 4,  label: "4 GB" },
+  { gb: 5,  label: "5 GB" },
+  { gb: 6,  label: "6 GB" },
+  { gb: 8,  label: "8 GB" },
+  { gb: 10, label: "10 GB" },
+  { gb: 12, label: "12 GB" },
 ];
 
 /**
