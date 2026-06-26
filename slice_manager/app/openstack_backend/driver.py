@@ -520,7 +520,8 @@ class OpenStackClient:
 
     def create_server(self, name: str, image_id: str, flavor_id: str,
                       port_ids: list[str], token: str,
-                      availability_zone: Optional[str] = None) -> dict:
+                      availability_zone: Optional[str] = None,
+                      user_data: Optional[str] = None) -> dict:
         networks = [{"port": pid} for pid in port_ids]
         server = {
             "name": name,
@@ -530,6 +531,12 @@ class OpenStackClient:
         }
         if availability_zone:
             server["availability_zone"] = availability_zone
+        if user_data:
+            # user_data debe estar en base64
+            import base64
+            server["user_data"] = base64.b64encode(
+                user_data.encode("utf-8")
+            ).decode("ascii")
 
         r = self._request(
             "POST", f"{self.nova_url()}/servers",
@@ -1007,6 +1014,26 @@ class OpenStackDriver:
                         "Creando VM %s con %d puertos | AZ=%s",
                         node_name, len(port_ids), az or "auto"
                     )
+                    # Si la VM tiene internet, inyectar script cloud-init
+                    # que levanta eth1 automáticamente al bootear.
+                    # Cirros ejecuta /etc/rc.local o user_data vía cloud-init.
+                    # El índice de la interfaz externa es siempre el último puerto.
+                    vm_user_data = None
+                    if node.get("internet"):
+                        # eth0 = puerto interno (VLAN), eth1 = puerto external
+                        # udhcpc en cirros necesita -R para aplicar rutas
+                        vm_user_data = """#!/bin/sh
+# Configurar interfaz de internet (eth1) automáticamente
+sleep 5
+sudo ip link set eth1 up
+sudo udhcpc -i eth1 -n -R -q 2>/dev/null || true
+# Agregar ruta por defecto si udhcpc no la configuró
+GW=$(ip route | grep default | awk '{print $3}' | head -1)
+if [ -z "$GW" ]; then
+    sudo ip route add default via 10.60.14.1 2>/dev/null || true
+fi
+"""
+
                     server = self.client.create_server(
                         name=node_name,
                         image_id=image_id,
@@ -1014,6 +1041,7 @@ class OpenStackDriver:
                         port_ids=port_ids,
                         token=scoped_token,
                         availability_zone=az,
+                        user_data=vm_user_data,
                     )
                     server_id = server["id"]
                     created_servers.append({
