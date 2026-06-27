@@ -295,78 +295,69 @@ function statCard(label, value) {
 }
 
 /**
- * Dos barras separadas para cualquier recurso — patrón Grafana/Datadog:
+ * Barra doble para cualquier recurso:
+ *   - Barra principal (color): % reservado por el orquestador
+ *   - Capa encima (blanco translúcido): % uso real del hardware
+ *   - Indicador ×N rojo: solo cuando overcommit activo (ratio > 1.0)
  *
- *   CPU    res. 2 vCPUs · total 4 vCPUs
- *   Reservado  [████████░░░░░░░░]  50%
- *   Uso real   [██░░░░░░░░░░░░░░]   4%
- *
- * La barra de reservado usa el color del umbral (cyan/amarillo/rojo).
- * La barra de uso real usa siempre un gris-azulado neutro para no confundir.
- * El badge de overcommit (×N) aparece solo cuando ratio > 1.0.
+ * Para disco: allowOvercommit=false, sin indicador de ratio.
  */
 function dualRow({ label, reservedVal, realVal, pctReserved, pctReal, totalVal, allowOvercommit, overcommitRatio }) {
+  // Clamp a 100% visualmente (el overcommit se indica con el badge, no desbordando la barra)
   const clampedRes  = Math.min(100, Math.max(0, pctReserved || 0));
   const clampedReal = Math.min(100, Math.max(0, pctReal     || 0));
 
-  // Color de la barra reservada según umbral de saturación
   const colorRes  = clampedRes > 85 ? "var(--danger)" : clampedRes > 60 ? "var(--warning)" : "var(--accent)";
-  // Uso real: siempre en gris-azulado, claramente distinto del reservado
-  const colorReal = "#4b6b8a";
+  const colorReal = "rgba(255,255,255,0.22)";
 
+  // Indicador de overcommit: solo si ratio > 1.0 y el recurso lo permite
   const showOvercommit = allowOvercommit && overcommitRatio > 1.0;
   const ratioLabel     = showOvercommit ? `×${overcommitRatio.toFixed(1)}` : null;
 
   return h(
     "div",
-    { style: "margin-bottom:14px" },
-
-    // ── Encabezado: label + badge overcommit + valores ───────────────
+    { style: "margin-bottom:12px" },
+    // ── Fila de encabezado ───────────────────────────────────────────
     h(
       "div",
-      { class: "flex justify-between items-center", style: "font-size:0.78rem;color:var(--text-dim);margin-bottom:5px" },
+      { class: "flex justify-between items-center", style: "font-size:0.78rem;color:var(--text-dim)" },
       h(
         "div",
         { style: "display:flex;align-items:center;gap:5px" },
-        h("span", { style: "font-weight:500;color:var(--text)" }, label),
+        h("span", {}, label),
+        // Badge de overcommit (×1.5 etc.) en rojo, solo cuando activo
         ratioLabel
           ? h("span", {
-              style: "background:var(--danger);color:#fff;font-size:0.60rem;padding:1px 5px;border-radius:3px;font-weight:700",
+              style: "background:var(--danger);color:#fff;font-size:0.62rem;padding:1px 5px;border-radius:3px;font-weight:600",
             }, ratioLabel)
           : null
       ),
-      h("span", { class: "mono", style: "font-size:0.70rem" },
+      h(
+        "span",
+        { class: "mono", style: "font-size:0.72rem" },
         `res. ${reservedVal} · real ${realVal} · total ${totalVal}`
       )
     ),
-
-    // ── Barra 1: Reservado ───────────────────────────────────────────
+    // ── Barra doble ──────────────────────────────────────────────────
     h(
       "div",
-      { style: "display:flex;align-items:center;gap:6px;margin-bottom:3px" },
-      h("span", { style: "font-size:0.62rem;color:var(--text-faint);width:52px;text-align:right;flex-shrink:0" }, "reservado"),
-      h(
-        "div",
-        { style: "flex:1;background:var(--border);border-radius:3px;height:5px;overflow:hidden" },
-        h("div", { style: `height:100%;width:${clampedRes}%;background:${colorRes};border-radius:3px;transition:width 0.4s` })
-      ),
-      h("span", { class: "mono", style: `font-size:0.62rem;width:30px;color:${colorRes};text-align:right;flex-shrink:0` },
-        `${clampedRes.toFixed(0)}%`
-      )
+      { style: "position:relative;background:var(--border);border-radius:4px;height:6px;margin-top:4px;overflow:hidden" },
+      // Capa 1 — reservado (color según umbral, clampeado a 100%)
+      h("div", { style: `position:absolute;left:0;top:0;height:100%;width:${clampedRes}%;background:${colorRes};border-radius:4px` }),
+      // Capa 2 — uso real (blanco translúcido encima)
+      h("div", { style: `position:absolute;left:0;top:0;height:100%;width:${clampedReal}%;background:${colorReal};border-radius:4px` })
     ),
-
-    // ── Barra 2: Uso real ────────────────────────────────────────────
+    // ── Leyenda ──────────────────────────────────────────────────────
     h(
       "div",
-      { style: "display:flex;align-items:center;gap:6px" },
-      h("span", { style: "font-size:0.62rem;color:var(--text-faint);width:52px;text-align:right;flex-shrink:0" }, "uso real"),
-      h(
-        "div",
-        { style: "flex:1;background:var(--border);border-radius:3px;height:5px;overflow:hidden" },
-        h("div", { style: `height:100%;width:${clampedReal}%;background:${colorReal};border-radius:3px;transition:width 0.4s` })
+      { style: "display:flex;gap:10px;margin-top:3px;font-size:0.64rem;color:var(--text-faint)" },
+      h("span", {},
+        h("span", { style: `display:inline-block;width:8px;height:8px;border-radius:2px;background:${colorRes};margin-right:3px;vertical-align:middle` }),
+        "reservado"
       ),
-      h("span", { class: "mono", style: `font-size:0.62rem;width:30px;color:${colorReal};text-align:right;flex-shrink:0` },
-        `${clampedReal.toFixed(0)}%`
+      h("span", {},
+        h("span", { style: "display:inline-block;width:8px;height:8px;border-radius:2px;background:rgba(255,255,255,0.35);margin-right:3px;vertical-align:middle" }),
+        "uso real"
       )
     )
   );
