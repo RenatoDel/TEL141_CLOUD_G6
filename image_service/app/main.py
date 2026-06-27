@@ -55,6 +55,10 @@ def detect_format(filename: str) -> str:
         return "iso"
     if lower.endswith(".raw"):
         return "raw"
+    if lower.endswith(".vmdk"):
+        return "vmdk"
+    if lower.endswith(".vhd") or lower.endswith(".vhdx"):
+        return "vhd"
     return "unknown"
 
 
@@ -68,6 +72,10 @@ def detect_os_type(filename: str) -> str:
         return "debian"
     if "centos" in lower or "rocky" in lower or "alma" in lower:
         return "linux"
+    if "windows" in lower or "win" in lower:
+        return "windows"
+    if "alpine" in lower:
+        return "alpine"
     return "linux"
 
 
@@ -154,6 +162,7 @@ def health():
 
 @app.get("/images")
 def list_images():
+    """Retorna el catálogo completo de imágenes registradas."""
     return load_catalog()
 
 

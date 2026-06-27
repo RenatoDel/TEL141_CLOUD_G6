@@ -7,8 +7,8 @@ Reglas centrales:
   profesor  : ve y actúa sobre slices propios + slices de alumnos en sus cursos.
               Puede crear slices "on behalf of" un alumno de sus cursos
               (campo owner_username en el payload).
-  coach     : read-only, filtrado por sus cursos asignados.
-              Ve slices de cursos donde está asignado como coach.
+  jefe de practica: read-only, filtrado por sus cursos asignados.
+              Ve slices de cursos donde está asignado como jefe de practica.
               No puede crear/editar/borrar/acciones.
   alumno    : ve solo sus propios slices. NO PUEDE CREAR slices
               (solo el profesor del curso puede crearlos a su nombre).
@@ -16,11 +16,11 @@ Reglas centrales:
 El JWT incluye los claims:
   sub      → username
   uid      → id numérico
-  role     → admin|profesor|coach|alumno
+  role     → admin|profesor|jefe de practica|alumno
   courses  → list[int] de course_ids
               · alumno   → cursos en los que está inscrito
               · profesor → cursos que dicta
-              · coach    → cursos que audita (M:N curso_coach)
+              · jefe de practica → cursos que audita (M:N curso_jp)
               · admin    → []
 """
 
@@ -100,7 +100,7 @@ def can_view_slice(user: dict, slice_data: dict) -> bool:
 
     admin        → cualquier slice
     profesor     → slices propios + slices de cursos que dicta
-    coach        → slices de cursos asignados (M:N curso_coach)
+    jefe_de_practica → slices de cursos asignados (M:N curso_coach)
     alumno       → solo sus propios slices
     """
     role = user["role"]
@@ -119,8 +119,8 @@ def can_view_slice(user: dict, slice_data: dict) -> bool:
         return False
 
     if role == ROL_COACH:
-        # Coach SOLO ve slices de cursos que audita. Si el slice no tiene
-        # curso_id asignado, no es visible para coaches.
+        # Jefe de práctica SOLO ve slices de cursos que audita. Si el slice no tiene
+        # curso_id asignado, no es visible para jefes de práctica.
         if curso_id is not None and curso_id in user_courses:
             return True
         return False
@@ -174,7 +174,7 @@ def resolve_owner_for_create(
     Reglas:
       - alumno: NUNCA puede crear slices (ni para sí mismo).
         Solo el profesor del curso los crea a su nombre.
-      - coach: bloqueado antes en require_write_access (read-only).
+      - jefe de practica: bloqueado antes en require_write_access (read-only).
       - Si no se especifica owner, el dueño es el caller.
       - admin/profesor pueden crear "on behalf of" otro usuario:
         · admin: para cualquier alumno.
