@@ -183,6 +183,28 @@ function renderStateBadge(state) {
 }
 
 /**
+ * Confirma contra el backend que el slice ya no existe en GET
+ * /graph-slices antes de navegar a la lista. Esto cierra la carrera
+ * entre "el job RQ se marcó finished" y "el archivo slices.json ya
+ * refleja el borrado" — sin esto, slices-list.js puede hacer su propio
+ * GET una fracción de segundo antes de que el archivo esté actualizado
+ * y pintar el slice como si siguiera ahí hasta el próximo F5.
+ */
+async function waitUntilSliceGone(sliceName, maxAttempts = 10, intervalMs = 300) {
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const slices = await SliceApi.listGraphSlices();
+      if (!slices.some((s) => s.slice_name === sliceName)) return;
+    } catch {
+      // si la consulta falla, igual seguimos reintentando
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  // Si tras maxAttempts sigue apareciendo, navegamos igual — el usuario
+  // puede refrescar manualmente, pero no nos quedamos colgados para siempre.
+}
+
+/**
  * Vista mostrada mientras el slice está "queued"/"started"/"deleting".
  * Arranca el polling de SliceApi.pollUntilDone y re-renderiza la página
  * completa cuando el job termina (éxito o error).
@@ -226,12 +248,20 @@ function renderPendingState(container, slice, sliceName) {
       badge.textContent = label;
     },
   })
-    .then(() => {
+    .then(async () => {
       showToast(
         isDeleting ? "Slice borrado correctamente" : "Slice desplegado correctamente",
         "success"
       );
       if (isDeleting) {
+        // El job RQ se marca "finished" apenas la función retorna, pero
+        // puede haber un margen mínimo antes de que el siguiente GET
+        // /graph-slices refleje el archivo ya actualizado. Confirmamos
+        // explícitamente contra el backend (en vez de confiar en el
+        // timing) antes de navegar, para que slices-list.js nunca pinte
+        // un snapshot viejo con el slice todavía en "deleting".
+        badge.textContent = "Confirmando borrado…";
+        await waitUntilSliceGone(sliceName);
         navigate("/slices");
       } else {
         // Re-renderizar la página con los datos finales (VMs, consola, etc.)
