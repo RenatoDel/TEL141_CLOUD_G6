@@ -156,6 +156,33 @@ export const SliceApi = {
 
   /** Resumen por curso (para profesor/coach) — slices visibles agrupados. */
   monitoringCoursesSummary: () => request("/api/monitoring/courses-summary"),
+
+  // ── Polling de jobs (módulo de colas Redis + RQ) ──────────────────────
+  /** Consulta el estado actual del job de deploy/borrado de un slice. */
+  getJobStatus: (sliceName) =>
+    request(`/api/graph-slices/${encodeURIComponent(sliceName)}/job-status`),
+
+  /**
+   * Hace polling de getJobStatus hasta que el job termine (finished/active)
+   * o falle, o se agote maxAttempts. Llama a onUpdate en cada tick con el
+   * estado actual, para que la UI pueda actualizar un badge en vivo.
+   */
+  async pollUntilDone(sliceName, { intervalMs = 2500, maxAttempts = 80, onUpdate } = {}) {
+    for (let i = 0; i < maxAttempts; i++) {
+      const status = await this.getJobStatus(sliceName);
+      if (onUpdate) onUpdate(status);
+
+      if (status.status === "finished" || status.status === "active") {
+        return status;
+      }
+      if (status.status === "failed") {
+        throw new ApiError(0, status.error || "El job falló", status);
+      }
+      // queued | started | deferred | deleting → seguir esperando
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    throw new ApiError(0, "Tiempo de espera agotado consultando el estado del job", null);
+  },
 };
 
 /**

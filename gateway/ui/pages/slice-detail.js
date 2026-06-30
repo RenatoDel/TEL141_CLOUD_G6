@@ -9,6 +9,12 @@
  * sin permitir drag, edit, ni delete) y un resumen de qué VMs tienen
  * salida a Internet habilitada.
  *
+ * Estado en vivo (módulo de colas): si el slice todavía está "queued",
+ * "started" o "deleting" (deploy/borrado corriendo en el worker RQ), se
+ * muestra un badge de progreso y se hace polling de
+ * GET /graph-slices/{name}/job-status hasta que termine, momento en el
+ * cual la página se re-renderiza con los datos finales (VMs, consola, etc).
+ *
  * Nota sobre la consola VNC: implementar el protocolo RFB completo está
  * fuera de alcance razonable para este módulo. En su lugar, abrimos el
  * websocket del proxy (gateway /ws/vnc-proxy) y mostramos al usuario el
@@ -23,6 +29,10 @@ import { TopologyCanvas } from "../lib/topology-canvas.js";
 import { h, statusBadge, showError, showToast, confirmDialog } from "../lib/components.js";
 import { canWrite, getToken } from "../lib/auth.js";
 import { navigate } from "../lib/router.js";
+
+// Estados que indican que el deploy/borrado todavía está en curso en el
+// worker RQ. Mientras el slice esté en uno de estos, se arranca polling.
+const PENDING_STATES = new Set(["queued", "started", "deleting", "deferred"]);
 
 export async function renderSliceDetail(container, { name }) {
   container.innerHTML = "";
@@ -61,7 +71,12 @@ export async function renderSliceDetail(container, { name }) {
       h(
         "div",
         {},
-        h("h1", { class: "mono" }, slice.slice_name),
+        h(
+          "div",
+          { class: "flex items-center gap-sm" },
+          h("h1", { class: "mono", style: "margin:0" }, slice.slice_name),
+          renderStateBadge(slice.state)
+        ),
         h(
           "div",
           { class: "page-subtitle" },
@@ -73,7 +88,7 @@ export async function renderSliceDetail(container, { name }) {
         "div",
         { class: "flex gap-sm" },
         h("a", { href: "#/slices", class: "btn btn-ghost" }, "← Volver"),
-        canWrite()
+        canWrite() && slice.state !== "deleting"
           ? h(
               "button",
               { class: "btn btn-danger", onClick: () => handleDeleteSlice(slice.slice_name) },
@@ -83,6 +98,33 @@ export async function renderSliceDetail(container, { name }) {
       )
     )
   );
+
+  // ─── Si el deploy/borrado sigue en curso, mostrar progreso y NO pintar
+  // las VMs todavía (pueden no existir aún, o estar a medio crear) ──────
+  if (PENDING_STATES.has(slice.state)) {
+    renderPendingState(container, slice, name);
+    return;
+  }
+
+  // ─── Si el último job falló, mostrar el error de forma visible ──────
+  if (slice.state === "failed") {
+    container.append(
+      h(
+        "div",
+        {
+          class: "card",
+          style:
+            "border-color:#d9534f;background:rgba(217,83,79,0.08);margin-bottom:1rem",
+        },
+        h("h3", { style: "margin:0 0 6px;color:#d9534f" }, "El despliegue falló"),
+        h(
+          "p",
+          { style: "margin:0;font-size:0.85rem;color:var(--text-dim)" },
+          slice.error || "Error desconocido. Revisa los logs del worker."
+        )
+      )
+    );
+  }
 
   const vms = slice.vms || [];
   if (vms.length === 0) {
@@ -113,6 +155,94 @@ export async function renderSliceDetail(container, { name }) {
     )
   );
   container.append(renderTopologyAndSummary(slice, vms));
+}
+
+/**
+ * Badge pequeño junto al nombre del slice indicando su estado actual.
+ * Devuelve null si el estado es "active" o no está definido (slices
+ * legacy creados antes de migrar al módulo de colas no tienen "state").
+ */
+function renderStateBadge(state) {
+  if (!state || state === "active") return null;
+  const labels = {
+    queued: ["En cola", "#f0ad4e"],
+    started: ["Desplegando…", "#f0ad4e"],
+    deleting: ["Borrando…", "#f0ad4e"],
+    deferred: ["En cola", "#f0ad4e"],
+    failed: ["Error", "#d9534f"],
+  };
+  const [text, color] = labels[state] || [state, "#999"];
+  return h(
+    "span",
+    {
+      class: "badge",
+      style: `background:${color}22;color:${color};border:1px solid ${color}55;padding:2px 8px;border-radius:4px;font-size:0.72rem;font-weight:600`,
+    },
+    text
+  );
+}
+
+/**
+ * Vista mostrada mientras el slice está "queued"/"started"/"deleting".
+ * Arranca el polling de SliceApi.pollUntilDone y re-renderiza la página
+ * completa cuando el job termina (éxito o error).
+ */
+function renderPendingState(container, slice, sliceName) {
+  const isDeleting = slice.state === "deleting";
+  const badge = h(
+    "span",
+    {
+      class: "badge",
+      style:
+        "background:#f0ad4e22;color:#f0ad4e;border:1px solid #f0ad4e55;padding:3px 10px;border-radius:4px;font-size:0.8rem;font-weight:600",
+    },
+    isDeleting ? "Borrando…" : "Desplegando…"
+  );
+
+  const card = h(
+    "div",
+    { class: "card", style: "text-align:center;padding:2.5rem 1rem" },
+    h("div", { style: "margin-bottom:12px" }, badge),
+    h(
+      "p",
+      { style: "color:var(--text-dim);font-size:0.85rem;margin:0" },
+      isDeleting
+        ? "Liberando recursos y eliminando las VMs del cluster físico. Esto puede tardar hasta un minuto."
+        : "Asignando recursos, creando redes y levantando las VMs en el cluster físico. Esto puede tardar entre 30 segundos y 2 minutos."
+    )
+  );
+  container.append(card);
+
+  SliceApi.pollUntilDone(sliceName, {
+    onUpdate: (status) => {
+      const label =
+        status.status === "started"
+          ? isDeleting
+            ? "Borrando…"
+            : "Desplegando…"
+          : status.status === "queued" || status.status === "deferred"
+          ? "En cola…"
+          : status.status;
+      badge.textContent = label;
+    },
+  })
+    .then(() => {
+      showToast(
+        isDeleting ? "Slice borrado correctamente" : "Slice desplegado correctamente",
+        "success"
+      );
+      if (isDeleting) {
+        navigate("/slices");
+      } else {
+        // Re-renderizar la página con los datos finales (VMs, consola, etc.)
+        renderSliceDetail(container, { name: sliceName });
+      }
+    })
+    .catch((err) => {
+      showError(err);
+      // Re-renderizar para mostrar el bloque de error visible (slice.state === "failed")
+      renderSliceDetail(container, { name: sliceName });
+    });
 }
 
 /**
@@ -382,8 +512,10 @@ async function handleDeleteSlice(sliceName) {
 
   try {
     await SliceApi.deleteGraphSlice(sliceName);
-    showToast("Slice borrado", "success");
-    navigate("/slices");
+    showToast("Borrado encolado, esto puede tardar unos segundos…", "info");
+    // Re-navegar a la misma página: ahora el slice viene con state="deleting"
+    // y renderSliceDetail mostrará el badge de progreso automáticamente.
+    navigate(`/slices/${encodeURIComponent(sliceName)}`);
   } catch (err) {
     showError(err);
   }

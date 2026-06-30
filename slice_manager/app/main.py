@@ -5,6 +5,9 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
+from app.queue import slice_queue, get_job_status
+from app.graph_orchestrator import run_create_graph_slice_job, run_delete_graph_slice_job
+
 from .auth import require_token
 from .graph_orchestrator import GraphOrchestrator
 from .graph_schemas import GraphSliceCreateRequest
@@ -330,7 +333,7 @@ async def delete_slice(slice_name: str, user: dict = Depends(require_write_acces
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Graph slices (topologías arbitrarias)
+# Graph slices (topologías arbitrarias) — creación/borrado vía cola RQ
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/graph-slices")
 def get_graph_slices(user: dict = Depends(current_user)):
@@ -338,7 +341,7 @@ def get_graph_slices(user: dict = Depends(current_user)):
     return filter_slices_for_user(user, all_graph)
 
 
-@app.post("/graph-slices")
+@app.post("/graph-slices", status_code=202)
 async def create_graph_slice(
     payload: GraphSliceCreateRequest,
     user: dict = Depends(require_write_access),
@@ -346,20 +349,15 @@ async def create_graph_slice(
     if any(s["slice_name"] == payload.slice_name for s in list_slices()):
         raise HTTPException(status_code=409, detail="Ya existe un slice con ese nombre")
 
-    # ─── Asignación automática de VLAN base ────────────────────────────────
-    # Si el cliente no especificó vlan_base (o mandó null), calculamos el
-    # siguiente libre. Si lo especificó (admin fijando una VLAN concreta),
-    # lo usamos tal cual pero validamos que no esté ya en uso.
+    # ─── Asignación automática de VLAN base (SIN CAMBIOS, se queda síncrona) ──
     if payload.vlan_base is None:
         links_needed = len(payload.links)
         try:
             assigned_vlan = next_free_vlan_base(links_needed)
         except ValueError as e:
             raise HTTPException(status_code=409, detail=str(e))
-        # Parcheamos el payload con la VLAN asignada (Pydantic v2: model_copy)
         payload = payload.model_copy(update={"vlan_base": assigned_vlan})
     else:
-        # Validar que la VLAN manual no solape con slices existentes
         requested_top = payload.vlan_base + len(payload.links) - 1
         for s in list_slices():
             existing_base = s.get("vlan_base")
@@ -372,51 +370,71 @@ async def create_graph_slice(
                     status_code=409,
                     detail=(
                         f"La VLAN base {payload.vlan_base} solapa con el slice "
-                        f"'{s['slice_name']}' (VLANs {existing_base}–{existing_top}). "
-                        "Elige otro rango o no especifiques vlan_base para asignación automática."
+                        f"'{s['slice_name']}' (VLANs {existing_base}–{existing_top})."
                     ),
                 )
 
     owner_username, curso_id = resolve_owner_for_create(
         user, payload.owner_username, payload.curso_id
     )
+    owner_uid = user["uid"] if owner_username == user["sub"] else None
 
-    try:
-        execution = await graph_orchestrator.create_graph_slice(payload)
-    except RuntimeError as e:
-        msg = str(e)
-        if "INFEASIBLE" in msg or "Placement" in msg:
-            raise HTTPException(status_code=409, detail=msg)
-        raise HTTPException(status_code=500, detail=msg)
-    if not execution["result"]["success"]:
-        raise HTTPException(
-            status_code=400,
-            detail=execution["result"].get("error") or "Error creando graph slice",
-        )
-
-    stored = {
+    # ─── Registrar el slice como "queued" ANTES de encolar ────────────────
+    # Así GET /graph-slices ya lo lista (con estado visible) desde el
+    # instante en que se acepta la request, sin esperar al worker.
+    add_slice({
         "mode": "graph",
+        "state": "queued",
         "slice_name": payload.slice_name,
-        "cluster": execution["cluster"],
-        "network_backend": payload.network_backend,
-        "internet_mode": payload.internet_mode,
+        "cluster": payload.cluster,
         "vlan_base": payload.vlan_base,
-        "workers": execution["workers"],
-        "vms": execution["result"]["vms"],
-        "links": execution["result"]["links"],
-        "nat": execution["result"].get("nat"),
-        "dhcp": execution["result"].get("dhcp", []),
-        # ─── Ownership ─────────────────────────────────────────────────
         "owner_username": owner_username,
-        "owner_uid": user["uid"] if owner_username == user["sub"] else None,
+        "owner_uid": owner_uid,
         "curso_id": curso_id,
         "created_by": user["sub"],
+    })
+
+    # ─── Encolar el deploy real ────────────────────────────────────────────
+    job = slice_queue.enqueue(
+        run_create_graph_slice_job,
+        payload.model_dump(),
+        owner_username,
+        owner_uid,
+        curso_id,
+        user["sub"],
+        job_id=f"create-{payload.slice_name}",  # ID predecible para polling
+    )
+
+    return {
+        "slice_name": payload.slice_name,
+        "job_id": job.id,
+        "status": "queued",
     }
-    add_slice(stored)
-    return execution
 
 
-@app.delete("/graph-slices/{slice_name}")
+@app.get("/graph-slices/{slice_name}/job-status")
+def get_slice_job_status(slice_name: str, user: dict = Depends(current_user)):
+    """
+    Polling de estado para un deploy o borrado en curso.
+    Usado por la UI para mostrar el badge de progreso en slice-detail.js.
+
+    Si el job ya expiró del TTL de Redis (terminó hace rato), cae a
+    state_store como fuente de verdad de respaldo.
+    """
+    found = get_slice(slice_name)
+
+    # Probar primero como job de creación, luego como job de borrado.
+    for prefix in ("create", "delete"):
+        status = get_job_status(f"{prefix}-{slice_name}")
+        if status["status"] != "not_found":
+            return status
+
+    if found:
+        return {"status": found.get("state", "unknown"), "slice": found}
+    raise HTTPException(status_code=404, detail="Slice no encontrado")
+
+
+@app.delete("/graph-slices/{slice_name}", status_code=202)
 async def delete_graph_slice(
     slice_name: str,
     user: dict = Depends(require_write_access),
@@ -428,9 +446,19 @@ async def delete_graph_slice(
         raise HTTPException(status_code=400, detail="El slice indicado no es de modo graph")
     assert_can_act(user, found)
 
-    remove_slice(slice_name)
-    result = await graph_orchestrator.delete_graph_slice(slice_name, found)
-    return {"slice_name": slice_name, "result": result}
+    # Marcar como "deleting" en lugar de borrar el registro de inmediato —
+    # el borrado real del registro lo hace el worker al terminar (o lo deja
+    # visible con error si el driver físico falla).
+    replace_slice(slice_name, {**found, "state": "deleting"})
+
+    job = slice_queue.enqueue(
+        run_delete_graph_slice_job,
+        slice_name,
+        found,
+        job_id=f"delete-{slice_name}",
+    )
+
+    return {"slice_name": slice_name, "job_id": job.id, "status": "deleting"}
 
 
 @app.post("/graph-vms/{slice_name}/{vm_name}/action")

@@ -1,6 +1,49 @@
 version: "3.9"
 
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - pucp_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  rq_worker:
+    build:
+      context: ./slice_manager
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["rq", "worker", "slices", "--url", "redis://redis:6379/0"]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DB_HOST: mariadb
+      DB_USER: pucp
+      DB_PASS: pucp_pass
+      DB_NAME: pucp_cloud
+      PLACEMENT_SERVICE_URL: http://placement_service:9003
+      IMAGE_SERVICE_URL: http://image_service:9004
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    volumes:
+      - slice_state:/app/state
+      - /home/ubuntu/.ssh:/root/.ssh:ro
+      - ./slice_manager/app:/app/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+    networks:
+      - pucp_net
 
   # ─────────────────────────────────────────────
   # Base de datos
@@ -96,6 +139,7 @@ services:
     env_file:
       - .env
     environment:
+      REDIS_URL: redis://redis:6379/0
       DB_HOST: mariadb
       DB_USER: pucp
       DB_PASS: pucp_pass
@@ -108,6 +152,8 @@ services:
       - /home/ubuntu/.ssh:/root/.ssh:ro
       - ./slice_manager/app:/app/app
     depends_on:
+      redis:
+        condition: service_healthy
       mariadb:
         condition: service_healthy
       placement_service:
@@ -205,6 +251,7 @@ volumes:
   prometheus_data:
   grafana_data:
   alertmanager_data:
+  redis_data:
 
 # ─────────────────────────────────────────────
 # Red interna

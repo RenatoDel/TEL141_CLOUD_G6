@@ -4,6 +4,8 @@ import logging
 
 import httpx
 
+import asyncio
+
 from .config import settings
 from .graph_schemas import GraphSliceCreateRequest, GraphNodeSpec
 
@@ -265,3 +267,112 @@ class GraphOrchestrator:
         self._set_driver(cluster)
 
         return self.driver.action_graph_vm(vm, action)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Wrappers síncronos para RQ — módulo de colas (Redis + RQ)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# RQ ejecuta tareas de forma síncrona dentro de cada proceso worker, por
+# eso estas funciones NO son async: envuelven la llamada al orquestador
+# (que sí es async) con asyncio.run(...), sin modificar GraphOrchestrator.
+#
+# Se registran como funciones de módulo (no métodos de clase) porque RQ
+# serializa la tarea por su "import path" (módulo.función) para que el
+# worker, que corre en un proceso/contenedor separado, pueda localizarla
+# e importarla por su cuenta.
+
+def run_create_graph_slice_job(
+    payload_dict: dict,
+    owner_username: str,
+    owner_uid: str | None,
+    curso_id: int | None,
+    created_by: str,
+) -> dict:
+    """
+    Wrapper síncrono ejecutado por el worker RQ.
+
+    Reconstruye el payload Pydantic desde el dict (que es lo único que
+    RQ puede serializar para encolarlo), corre el deploy real a través
+    del orquestador existente, y persiste el resultado final en
+    state_store reemplazando el registro "queued" creado por el endpoint
+    al momento de encolar.
+
+    IMPORTANTE: state_store.replace_slice() REEMPLAZA el dict completo
+    (no lo mergea con el registro anterior) — por eso aquí se construye
+    el dict de salida con TODOS los campos necesarios, igual que hacía
+    el endpoint síncrono original antes de migrar a colas.
+    """
+    from app.graph_schemas import GraphSliceCreateRequest
+    from app.state_store import replace_slice
+
+    payload = GraphSliceCreateRequest(**payload_dict)
+    orchestrator = GraphOrchestrator()
+
+    try:
+        execution = asyncio.run(orchestrator.create_graph_slice(payload))
+    except Exception as e:
+        replace_slice(payload.slice_name, {
+            "mode": "graph",
+            "state": "failed",
+            "slice_name": payload.slice_name,
+            "cluster": payload.cluster,
+            "vlan_base": payload.vlan_base,
+            "error": str(e),
+            "owner_username": owner_username,
+            "owner_uid": owner_uid,
+            "curso_id": curso_id,
+            "created_by": created_by,
+        })
+        raise  # RQ marca el job como "failed" y guarda el traceback completo
+
+    if not execution["result"]["success"]:
+        replace_slice(payload.slice_name, {
+            "mode": "graph",
+            "state": "failed",
+            "slice_name": payload.slice_name,
+            "cluster": execution["cluster"],
+            "vlan_base": payload.vlan_base,
+            "error": execution["result"].get("error", "Error desconocido"),
+            "owner_username": owner_username,
+            "owner_uid": owner_uid,
+            "curso_id": curso_id,
+            "created_by": created_by,
+        })
+        return execution
+
+    stored = {
+        "mode": "graph",
+        "state": "active",
+        "slice_name": payload.slice_name,
+        "cluster": execution["cluster"],
+        "network_backend": payload.network_backend,
+        "internet_mode": payload.internet_mode,
+        "vlan_base": payload.vlan_base,
+        "workers": execution["workers"],
+        "vms": execution["result"]["vms"],
+        "links": execution["result"]["links"],
+        "nat": execution["result"].get("nat"),
+        "dhcp": execution["result"].get("dhcp", []),
+        "owner_username": owner_username,
+        "owner_uid": owner_uid,
+        "curso_id": curso_id,
+        "created_by": created_by,
+    }
+    replace_slice(payload.slice_name, stored)
+    return execution
+
+
+def run_delete_graph_slice_job(slice_name: str, found_dict: dict) -> dict:
+    """Wrapper síncrono para el borrado, ejecutado por el worker RQ."""
+    from app.state_store import delete_slice
+
+    orchestrator = GraphOrchestrator()
+    result = asyncio.run(
+        orchestrator.delete_graph_slice(slice_name, found_dict)
+    )
+    # Si delete_graph_slice lanza, RQ marca el job "failed" y el registro
+    # se queda con state="deleting" (lo dejó así el endpoint al encolar),
+    # visible en la UI para que el usuario o un admin reintente o investigue.
+    delete_slice(slice_name)
+    return result

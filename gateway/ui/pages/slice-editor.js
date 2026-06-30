@@ -14,6 +14,12 @@
  *     curso, después el selector de alumnos se filtra a los inscritos
  *     en ese curso).
  *   - Alumnos quedan bloqueados completamente (la ruta redirige).
+ *
+ * Nota sobre creación asíncrona (módulo de colas): SliceApi.createGraphSlice
+ * devuelve inmediatamente (202) con {slice_name, job_id, status:"queued"},
+ * SIN esperar a que el deploy físico termine. El detalle del slice
+ * (slice-detail.js) es quien hace polling del estado y muestra el progreso
+ * en vivo, así que aquí solo navegamos para allá apenas se acepta la request.
  */
 
 import { SliceApi, AuthApi } from "../lib/api.js";
@@ -814,8 +820,12 @@ async function handleSubmit({ canvas, nameInput, clusterInput, ownerSelect, cour
   submitBtn.textContent = "Creando…";
 
   try {
+    // El backend ahora encola el deploy (202 Accepted) y responde de
+    // inmediato con {slice_name, job_id, status:"queued"} — el deploy
+    // físico real corre en el worker RQ, no aquí. Navegamos directo al
+    // detalle, que se encarga de hacer polling y mostrar el progreso.
     await SliceApi.createGraphSlice(payload);
-    showToast(`Slice "${sliceName}" creado correctamente`, "success");
+    showToast(`Slice "${sliceName}" encolado, desplegando…`, "info");
     navigate(`/slices/${encodeURIComponent(sliceName)}`);
   } catch (err) {
     showError(err);
