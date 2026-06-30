@@ -172,13 +172,11 @@ export const SliceApi = {
       const status = await this.getJobStatus(sliceName);
       if (onUpdate) onUpdate(status);
 
-      if (status.status === "finished" || status.status === "active") {
-        return status;
-      }
-      if (status.status === "failed") {
-        throw new ApiError(0, status.error || "El job falló", status);
-      }
-      // queued | started | deferred | deleting → seguir esperando
+      if (status.status === "finished" || status.status === "active") return status;
+      // "not_found" significa que el job expiró del TTL de Redis Y el slice
+      // ya no está en state_store — para un borrado, eso es éxito.
+      if (status.status === "not_found") return status;
+      if (status.status === "failed") throw new ApiError(0, status.error || "El job falló", status);
       await new Promise((r) => setTimeout(r, intervalMs));
     }
     throw new ApiError(0, "Tiempo de espera agotado consultando el estado del job", null);

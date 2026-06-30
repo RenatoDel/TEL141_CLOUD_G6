@@ -196,7 +196,7 @@ async function handleDelete(sliceName, container) {
         showToast(`Slice "${sliceName}" borrado`, "success");
         renderSlicesList(container);
       })
-      .catch(() => {
+      .catch((err) => {
         // Si falla o expira el polling, igual refrescamos para reflejar
         // el estado más reciente (puede haber quedado en "failed").
         renderSlicesList(container);
