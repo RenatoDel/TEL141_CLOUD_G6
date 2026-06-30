@@ -91,7 +91,7 @@ export async function renderSliceDetail(container, { name }) {
         canWrite() && slice.state !== "deleting"
           ? h(
               "button",
-              { class: "btn btn-danger", onClick: () => handleDeleteSlice(slice.slice_name) },
+              { class: "btn btn-danger", onClick: () => handleDeleteSlice(slice.slice_name, container) },
               "Borrar slice"
             )
           : null
@@ -501,7 +501,7 @@ function actionButton(sliceName, vmName, action, label) {
   );
 }
 
-async function handleDeleteSlice(sliceName) {
+async function handleDeleteSlice(sliceName, container) {
   const confirmed = await confirmDialog({
     title: "Borrar slice",
     message: `¿Seguro que quieres borrar "${sliceName}"? Esta acción no se puede deshacer.`,
@@ -513,9 +513,13 @@ async function handleDeleteSlice(sliceName) {
   try {
     await SliceApi.deleteGraphSlice(sliceName);
     showToast("Borrado encolado, esto puede tardar unos segundos…", "info");
-    // Re-navegar a la misma página: ahora el slice viene con state="deleting"
-    // y renderSliceDetail mostrará el badge de progreso automáticamente.
-    navigate(`/slices/${encodeURIComponent(sliceName)}`);
+
+    // No usamos navigate() aquí: ya estamos en /slices/{sliceName}, así que
+    // navegar a la misma ruta es un no-op para el router (no re-renderiza).
+    // En su lugar, mostramos el estado "deleting" directamente en el
+    // contenedor actual, igual que si hubiéramos recargado la página.
+    container.innerHTML = "";
+    renderPendingState(container, { state: "deleting" }, sliceName);
   } catch (err) {
     showError(err);
   }
