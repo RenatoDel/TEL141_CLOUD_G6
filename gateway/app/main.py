@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 SLICE_MANAGER_URL = os.getenv("SLICE_MANAGER_URL", "http://slice_manager:9002").rstrip("/")
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth_service:9001").rstrip("/")
 IMAGE_SERVICE_URL = os.getenv("IMAGE_SERVICE_URL", "http://image_service:9004").rstrip("/")
+PLACEMENT_SERVICE_URL = os.getenv("PLACEMENT_SERVICE_URL", "http://placement_service:9003").rstrip("/")
 
 SSH_USER = os.getenv("WORKER_SSH_USER", "ubuntu")
 SSH_KEY_PATH = os.getenv("WORKER_SSH_KEY_PATH", "/app/ssh_keys/id_ecdsa")
@@ -330,6 +331,9 @@ async def proxy_images_upload_raw(request: Request):
 async def proxy_images(path: str, request: Request):
     return await forward_request(IMAGE_SERVICE_URL, f"images/{path}", request)
 
+@app.api_route("/api/placement/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def proxy_placement(path: str, request: Request):
+    return await forward_request(PLACEMENT_SERVICE_URL, path, request)
 
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy_slice_manager(path: str, request: Request):
