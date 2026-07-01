@@ -162,6 +162,8 @@ export const SliceApi = {
   getJobStatus: (sliceName) =>
     request(`/api/graph-slices/${encodeURIComponent(sliceName)}/job-status`),
 
+  placementWorkersStatus: (zone) =>
+  request(`/api/placement/workers/status${zone ? `?zone=${zone}` : ""}`),
   /**
    * Hace polling de getJobStatus hasta que el job termine (finished/active)
    * o falle, o se agote maxAttempts. Llama a onUpdate en cada tick con el

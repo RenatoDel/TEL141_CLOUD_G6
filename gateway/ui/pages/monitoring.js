@@ -57,7 +57,29 @@ async function renderAdminMonitoring(container) {
 
   async function refresh() {
     try {
-      const summary = await SliceApi.monitoringSummary();
+      const [summary, placementWorkers] = await Promise.all([
+        SliceApi.monitoringSummary(),
+        SliceApi.placementWorkersStatus().catch(() => []),
+      ]);
+
+      // Mergear datos de placement en cada worker del summary
+      const placementByName = {};
+      for (const pw of placementWorkers) {
+        placementByName[pw.name] = pw;
+      }
+      for (const w of summary.workers || []) {
+        const pw = placementByName[w.worker];
+        if (pw) {
+          w.vcpus_total      = pw.cpu_total;
+          w.vcpus_reserved   = pw.vcpus_used;
+          w.ram_reserved_mb  = pw.ram_used_gb * 1024;
+          w.disk_reserved_gb = pw.disk_used_gb;
+          w.disk_capacity_gb = pw.disk_total_gb;
+          w.cap_cpu_efectiva = pw.cap_cpu_efectiva;
+          w.cap_ram_efectiva = pw.cap_ram_gb_efectiva;
+        }
+      }
+
       renderClusterBlock(linuxSection,     "Linux Cluster",     "linux",     summary);
       renderClusterBlock(openstackSection, "OpenStack Cluster", "openstack", summary);
     } catch (err) {
