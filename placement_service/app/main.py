@@ -221,32 +221,29 @@ async def get_prometheus_usage(worker_names: list[str]) -> dict[str, dict[str, f
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             for worker_name in worker_names:
+                # --- CPU: ventana 5 min, estimador histórico ---
+                cpu_count_query = (
+                    f'count_over_time(rate(node_cpu_seconds_total'
+                    f'{{node="{worker_name}",mode="idle"}}[1m])[5m:30s])'
+                )
                 cpu_avg_query = (
                     f'1 - avg(avg_over_time(rate(node_cpu_seconds_total'
-                    f'{{node="{worker_name}",mode="idle"}}[1m])[{PROMETHEUS_WINDOW}:1m]))'
-                )
-                ram_avg_query = (
-                    f'1 - avg_over_time('
-                    f'(node_memory_MemAvailable_bytes{{node="{worker_name}"}}'
-                    f' / node_memory_MemTotal_bytes{{node="{worker_name}"}})'
-                    f'[{PROMETHEUS_WINDOW}:1m])'
+                    f'{{node="{worker_name}",mode="idle"}}[1m])[5m:30s]))'
                 )
                 cpu_std_query = (
                     f'stddev(avg_over_time(rate(node_cpu_seconds_total'
-                    f'{{node="{worker_name}",mode="idle"}}[1m])[{PROMETHEUS_WINDOW}:1m]))'
+                    f'{{node="{worker_name}",mode="idle"}}[1m])[5m:30s]))'
                 )
-                ram_std_query = (
-                    f'stddev_over_time('
-                    f'(1 - node_memory_MemAvailable_bytes{{node="{worker_name}"}}'
+                # --- RAM: métrica instantánea, sin ventana histórica ---
+                ram_inst_query = (
+                    f'1 - (node_memory_MemAvailable_bytes{{node="{worker_name}"}}'
                     f' / node_memory_MemTotal_bytes{{node="{worker_name}"}})'
-                    f'[{PROMETHEUS_WINDOW}:1m])'
                 )
-
                 queries = [
-                    ("avg_cpu", cpu_avg_query),
-                    ("avg_ram", ram_avg_query),
-                    ("std_cpu", cpu_std_query),
-                    ("std_ram", ram_std_query),
+                    ("cpu_count", cpu_count_query),
+                    ("avg_cpu",   cpu_avg_query),
+                    ("std_cpu",   cpu_std_query),
+                    ("avg_ram",   ram_inst_query),
                 ]
 
                 for metric, query in queries:
@@ -257,10 +254,23 @@ async def get_prometheus_usage(worker_names: list[str]) -> dict[str, dict[str, f
                     data = resp.json()
                     if data.get("status") == "success" and data["data"]["result"]:
                         value = float(data["data"]["result"][0]["value"][1])
-                        if metric.startswith("avg"):
-                            result[worker_name][metric] = max(0.01, min(1.0, value))
-                        else:
-                            result[worker_name][metric] = max(0.0, value)
+                        if metric == "cpu_count":
+                            # Cold start check: < 3 puntos → fallback ρ=1
+                            if value < 3:
+                                logger.warning(
+                                    "Worker %s tiene historia insuficiente en Prometheus "
+                                    "(%d puntos), aplicando fallback ρ=1", worker_name, int(value)
+                                )
+                                result[worker_name]["avg_cpu"] = OC_FALLBACK
+                                result[worker_name]["std_cpu"] = 0.0
+                        elif metric == "avg_cpu":
+                            result[worker_name]["avg_cpu"] = max(0.01, min(1.0, value))
+                        elif metric == "std_cpu":
+                            result[worker_name]["std_cpu"] = max(0.0, value)
+                        elif metric == "avg_ram":
+                            # RAM instantánea: restricción dura, no promedio
+                            result[worker_name]["avg_ram"] = max(0.01, min(1.0, value))
+                            result[worker_name]["std_ram"] = 0.0  # sin varianza para RAM
 
     except Exception as exc:
         logger.warning("Prometheus no disponible, usando fallback ratio=1.0 sin penalización de varianza: %s", exc)

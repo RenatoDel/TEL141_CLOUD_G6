@@ -4,6 +4,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports:
       - "6379:6379"
     volumes:
@@ -102,6 +103,31 @@ services:
       DB_USER: pucp
       DB_PASS: pucp_pass
       DB_NAME: pucp_cloud
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - pucp_net
+
+  # ─────────────────────────────────────────────
+  # Reconcile Worker  (proceso de reconciliación periódica)
+  # ─────────────────────────────────────────────
+  reconcile_worker:
+    build: ./placement_service
+    container_name: pucp_reconcile
+    restart: unless-stopped
+    command: ["python3", "/app/reconcile.py"]
+    env_file:
+      - .env
+    environment:
+      DB_HOST: mariadb
+      DB_USER: pucp
+      DB_PASS: pucp_pass
+      DB_NAME: pucp_cloud
+      RECONCILE_INTERVAL: "300"
+      SLICES_JSON_PATH: /app/state/slices.json
+    volumes:
+      - slice_state:/app/state
     depends_on:
       mariadb:
         condition: service_healthy
