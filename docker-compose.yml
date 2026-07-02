@@ -116,7 +116,7 @@ services:
     build: ./placement_service
     container_name: pucp_reconcile
     restart: unless-stopped
-    command: ["python3", "/app/reconcile.py"]
+    command: ["python3", "/app/app/reconcile.py"]
     env_file:
       - .env
     environment:
