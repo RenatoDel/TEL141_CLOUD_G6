@@ -51,7 +51,7 @@ async function renderAdminMonitoring(container) {
     )
   );
 
-  const linuxSection    = h("div", { class: "mb-md" });
+  const linuxSection     = h("div", { class: "mb-md" });
   const openstackSection = h("div", { class: "mb-md" });
   container.append(linuxSection, openstackSection);
 
@@ -77,6 +77,17 @@ async function renderAdminMonitoring(container) {
           w.disk_capacity_gb = pw.disk_total_gb;
           w.cap_cpu_efectiva = pw.cap_cpu_efectiva;
           w.cap_ram_efectiva = pw.cap_ram_gb_efectiva;
+        }
+      }
+
+      // Recalcular totales con valores reservados (MariaDB) para RAM y disco
+      for (const clusterKey of ["linux", "openstack"]) {
+        const ws = (summary.workers || []).filter(w => w.cluster === clusterKey);
+        if (summary.totals_by_cluster?.[clusterKey]) {
+          summary.totals_by_cluster[clusterKey].mem_used_gb =
+            ws.reduce((s, w) => s + (w.ram_reserved_mb || 0) / 1024, 0);
+          summary.totals_by_cluster[clusterKey].disk_used_gb =
+            ws.reduce((s, w) => s + (w.disk_reserved_gb || 0), 0);
         }
       }
 
