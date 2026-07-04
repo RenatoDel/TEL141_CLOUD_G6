@@ -39,10 +39,19 @@ CREATE TABLE IF NOT EXISTS imagen (
 INSERT IGNORE INTO usuario (id, username, password_hash, email, rol) VALUES
   (1, 'admin', '$2b$12$placeholder', 'admin@pucp.edu.pe', 'admin');
 
+-- Linux cluster (zona az-linux) + headnode reservado
 INSERT IGNORE INTO servidor_fisico (id, nombre, ip_interna, zona_disponibilidad, vcpus_total, ram_total_mb, storage_total_gb) VALUES
-  (1, 'server1', '10.0.10.1', 'az-a', 4, 8192, 100),
-  (2, 'server2', '10.0.10.2', 'az-a', 4, 8192, 100),
-  (3, 'server3', '10.0.10.3', 'az-b', 4, 8192, 100);
+  (1, 'server1', '10.0.10.1',     'az-linux',    4, 8192,  14),
+  (2, 'server2', '10.0.10.2',     'az-linux',    4, 8192,  14),
+  (3, 'server3', '10.0.10.3',     'az-linux',    4, 8192,  14),
+  (4, 'server4', '192.168.201.4', 'az-headnode', 4, 8192, 100);
+
+-- OpenStack cluster (zona az-openstack)
+-- worker3 tiene el doble de RAM que worker1/2 (medido con Prometheus)
+INSERT IGNORE INTO servidor_fisico (id, nombre, ip_interna, zona_disponibilidad, vcpus_total, ram_total_mb, storage_total_gb) VALUES
+  (5, 'worker1', '192.168.202.1', 'az-openstack', 4, 3919, 14),
+  (6, 'worker2', '192.168.202.2', 'az-openstack', 4, 3919, 14),
+  (7, 'worker3', '192.168.202.3', 'az-openstack', 4, 7945, 14);
 
 INSERT IGNORE INTO imagen (id, nombre, filename, os_type, formato, size_gb, activa) VALUES
   (1, 'cirros-base.img', 'cirros-base.img', 'cirros', 'qcow2', 0.10, 1);
