@@ -45,6 +45,8 @@ services:
         condition: service_healthy
     networks:
       - pucp_net
+    extra_hosts:
+      - "controller:192.168.202.20"
 
   # ─────────────────────────────────────────────
   # Base de datos
@@ -173,6 +175,7 @@ services:
       PLACEMENT_SERVICE_URL: http://placement_service:9003
       IMAGE_SERVICE_URL: http://image_service:9004
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      OS_OPENSTACK_PARALLEL_WORKERS: ${OS_OPENSTACK_PARALLEL_WORKERS:-6}
     volumes:
       - slice_state:/app/state
       - /home/ubuntu/.ssh:/root/.ssh:ro
@@ -188,6 +191,8 @@ services:
         condition: service_started
     networks:
       - pucp_net
+    extra_hosts:
+      - "controller:192.168.202.20"
 
   # ─────────────────────────────────────────────
   # API Gateway  (puerto 8500 — punto de entrada)

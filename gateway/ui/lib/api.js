@@ -135,6 +135,38 @@ export const SliceApi = {
   createGraphSlice: (payload) =>
     request("/api/graph-slices", { method: "POST", body: payload }),
 
+  createDraft: (payload) =>
+    request("/api/graph-slices/drafts", { method: "POST", body: payload }),
+
+  updateDraft: (sliceName, payload) =>
+    request(`/api/graph-slices/drafts/${encodeURIComponent(sliceName)}`, {
+      method: "PUT",
+      body: payload,
+    }),
+
+  deployDraft: (sliceName) =>
+    request(`/api/graph-slices/drafts/${encodeURIComponent(sliceName)}/deploy`, {
+      method: "POST",
+    }),
+
+  exportGraphSlice: (sliceName) =>
+    request(`/api/graph-slices/${encodeURIComponent(sliceName)}/export`),
+
+  importGraphSlice: (topology, newSliceName = null) =>
+    request("/api/graph-slices/import", {
+      method: "POST",
+      body: {
+        topology,
+        ...(newSliceName ? { new_slice_name: newSliceName } : {}),
+      },
+    }),
+
+  cloneGraphSlice: (sliceName, newSliceName) =>
+    request(`/api/graph-slices/${encodeURIComponent(sliceName)}/clone`, {
+      method: "POST",
+      body: { new_slice_name: newSliceName },
+    }),
+
   deleteGraphSlice: (sliceName) =>
     request(`/api/graph-slices/${encodeURIComponent(sliceName)}`, {
       method: "DELETE",

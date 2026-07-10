@@ -52,6 +52,77 @@ class GraphOrchestrator:
             self._current_cluster = cluster
             logger.info("Driver cambiado a: %s", cluster)
 
+    def _linux_control_worker_names(self) -> set[str]:
+        """
+        Workers que representan infraestructura de control/headnode.
+
+        En esta arquitectura, el headnode/server4 no aloja slices ni VMs.
+        """
+        blocked: set[str] = set()
+        headnode_port = str(settings.headnode_ssh_port)
+
+        for worker in settings.workers:
+            name = str(worker.get("name", ""))
+            lname = name.lower()
+            port = str(worker.get("port", ""))
+
+            if lname in {"server4", "headnode"} or port == headnode_port:
+                blocked.add(name)
+
+        return blocked
+
+    def _avoid_linux_control_workers(
+        self,
+        nodes: list[dict],
+        assignments: dict[str, str],
+        cluster: str,
+    ) -> dict[str, str]:
+        """
+        Evita que el placement coloque VMs Linux en el headnode/server4.
+        """
+        if cluster != "linux":
+            return assignments
+
+        blocked = self._linux_control_worker_names()
+        if not blocked:
+            return assignments
+
+        allowed = [
+            worker["name"]
+            for worker in settings.workers
+            if worker.get("name") not in blocked
+        ]
+
+        if not allowed:
+            raise RuntimeError("No hay workers Linux disponibles excluyendo el headnode")
+
+        adjusted = dict(assignments)
+        rr = 0
+
+        for node in nodes:
+            name = node["name"]
+            current = adjusted.get(name)
+
+            if current not in blocked:
+                continue
+
+            preferred = node.get("preferred_worker")
+            if preferred in allowed:
+                replacement = preferred
+            else:
+                replacement = allowed[rr % len(allowed)]
+                rr += 1
+
+            logger.info(
+                "linux placement: evitando headnode/control %s -> %s para VM %s",
+                current,
+                replacement,
+                name,
+            )
+            adjusted[name] = replacement
+
+        return adjusted
+
     async def _assign_workers(
         self,
         nodes: list[dict],
@@ -162,6 +233,10 @@ class GraphOrchestrator:
         # automáticamente por cluster="linux" (excluye workers de OpenStack)
         # Obtener asignación óptima del placement_service
         assignments = await self._assign_workers(nodes, zone=zone, cluster=cluster)
+
+        # En Linux, el headnode/server4 es infraestructura de control y no debe
+        # alojar VMs de slices.
+        assignments = self._avoid_linux_control_workers(nodes, assignments, cluster)
 
         enriched_nodes = []
         for idx, node in enumerate(nodes):
@@ -317,7 +392,12 @@ def run_create_graph_slice_job(
             "state": "failed",
             "slice_name": payload.slice_name,
             "cluster": payload.cluster,
+            "availability_zone": payload.availability_zone,
+            "network_backend": payload.network_backend,
+            "internet_mode": payload.internet_mode,
             "vlan_base": payload.vlan_base,
+            "nodes": payload.model_dump(by_alias=True)["nodes"],
+            "links": payload.model_dump(by_alias=True)["links"],
             "error": str(e),
             "owner_username": owner_username,
             "owner_uid": owner_uid,
@@ -332,7 +412,12 @@ def run_create_graph_slice_job(
             "state": "failed",
             "slice_name": payload.slice_name,
             "cluster": execution["cluster"],
+            "availability_zone": payload.availability_zone,
+            "network_backend": payload.network_backend,
+            "internet_mode": payload.internet_mode,
             "vlan_base": payload.vlan_base,
+            "nodes": payload.model_dump(by_alias=True)["nodes"],
+            "links": payload.model_dump(by_alias=True)["links"],
             "error": execution["result"].get("error", "Error desconocido"),
             "owner_username": owner_username,
             "owner_uid": owner_uid,
@@ -346,9 +431,11 @@ def run_create_graph_slice_job(
         "state": "active",
         "slice_name": payload.slice_name,
         "cluster": execution["cluster"],
+        "availability_zone": payload.availability_zone,
         "network_backend": payload.network_backend,
         "internet_mode": payload.internet_mode,
         "vlan_base": payload.vlan_base,
+        "nodes": payload.model_dump(by_alias=True)["nodes"],
         "workers": execution["workers"],
         "vms": execution["result"]["vms"],
         "links": execution["result"]["links"],

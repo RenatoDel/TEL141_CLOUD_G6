@@ -86,8 +86,34 @@ export async function renderSliceDetail(container, { name }) {
       ),
       h(
         "div",
-        { class: "flex gap-sm" },
+        { class: "flex gap-sm", style: "flex-wrap:wrap" },
         h("a", { href: "#/slices", class: "btn btn-ghost" }, "← Volver"),
+        h(
+          "button",
+          { class: "btn btn-ghost", onClick: () => handleExportSlice(slice.slice_name) },
+          "Exportar JSON"
+        ),
+        canWrite() && slice.state !== "deleting"
+          ? h(
+              "button",
+              { class: "btn btn-ghost", onClick: () => handleCloneSlice(slice.slice_name) },
+              "Clonar"
+            )
+          : null,
+        canWrite() && slice.state === "draft"
+          ? h(
+              "a",
+              { href: `#/slices/${encodeURIComponent(slice.slice_name)}/edit`, class: "btn btn-ghost" },
+              "Editar"
+            )
+          : null,
+        canWrite() && slice.state === "draft"
+          ? h(
+              "button",
+              { class: "btn btn-primary", onClick: () => handleDeployDraft(slice.slice_name, container) },
+              "Desplegar"
+            )
+          : null,
         canWrite() && slice.state !== "deleting"
           ? h(
               "button",
@@ -124,6 +150,34 @@ export async function renderSliceDetail(container, { name }) {
         )
       )
     );
+  }
+
+  if (slice.state === "draft") {
+    const draftNodes = slice.nodes || [];
+    container.append(
+      h(
+        "div",
+        {
+          class: "card",
+          style: "border-color:#6f7df355;background:#6f7df30d;margin-bottom:1rem",
+        },
+        h("h3", { style: "margin:0 0 6px;color:#8d98ff" }, "Borrador sin desplegar"),
+        h(
+          "p",
+          { style: "margin:0;font-size:0.85rem;color:var(--text-dim)" },
+          "La definición está guardada, pero todavía no existen VMs, redes ni reglas físicas. Puedes editarla, exportarla, clonarla o desplegarla."
+        )
+      )
+    );
+    container.append(
+      h(
+        "h2",
+        { style: "font-size:1rem;margin:1rem 0 0.75rem;color:var(--text)" },
+        "Topología guardada"
+      )
+    );
+    container.append(renderTopologyAndSummary(slice, draftNodes));
+    return;
   }
 
   const vms = slice.vms || [];
@@ -170,6 +224,7 @@ function renderStateBadge(state) {
     deleting: ["Borrando…", "#f0ad4e"],
     deferred: ["En cola", "#f0ad4e"],
     failed: ["Error", "#d9534f"],
+    draft: ["Borrador", "#6f7df3"],
   };
   const [text, color] = labels[state] || [state, "#999"];
   return h(
@@ -390,14 +445,17 @@ function renderTopologyAndSummary(slice, vms) {
           },
           "Con acceso a Internet"
         ),
-        ...internetVms.map((vm) =>
-          h(
+        ...internetVms.map((vm) => {
+          const forward = getVmSshForward(slice, vm);
+          const sshText = sshCommandText(forward);
+          return h(
             "div",
             { class: "mono", style: "font-size:0.78rem;color:var(--text);line-height:1.5" },
             `· ${vm.name}` +
-              (vm.external_ip ? ` → ${vm.external_ip}` : "")
-          )
-        )
+              (vm.external_ip ? ` → ${vm.external_ip}` : "") +
+              (sshText ? ` · ${sshText}` : "")
+          );
+        })
       )
     );
   } else {
@@ -426,7 +484,86 @@ function summaryRow(label, value) {
   );
 }
 
+function inferSshUserFromVm(vm) {
+  const image = String(vm?.stored_filename || vm?.image_name || "").toLowerCase();
+  if (image.includes("cirros")) return "cirros";
+  return "ubuntu";
+}
+
+function inferSshCredentialHintFromVm(vm) {
+  const image = String(vm?.stored_filename || vm?.image_name || "").toLowerCase();
+  if (image.includes("cirros")) return "cirros / gocubsgo";
+  if (image.includes("ubuntu")) return "ubuntu / ubuntu";
+  return null;
+}
+
+function normalizeSshForward(forward, vm) {
+  if (!forward) return null;
+
+  const host =
+    forward.public_host ||
+    forward.ssh_host ||
+    forward.headnode_ip ||
+    (forward.external_endpoint ? String(forward.external_endpoint).split(":")[0] : null);
+
+  const port = forward.ssh_port;
+  const user = forward.ssh_user || inferSshUserFromVm(vm);
+  const credential = forward.credential_hint || forward.ssh_credential_hint || inferSshCredentialHintFromVm(vm);
+
+  return {
+    ...forward,
+    vm: forward.vm || vm?.name || vm?.vm_id,
+    public_host: host,
+    ssh_host: host,
+    ssh_port: port,
+    ssh_user: user,
+    credential_hint: credential,
+    target_ip: forward.target_ip || forward.ssh_target_ip,
+    external_endpoint: forward.external_endpoint || (host && port ? `${host}:${port}` : null),
+    ssh_command: host && port ? `ssh -p ${port} ${user}@${host}` : forward.ssh_command,
+  };
+}
+
+function getVmSshForward(slice, vm) {
+  if (!vm) return null;
+
+  if (vm.ssh_command || vm.ssh_port) {
+    return normalizeSshForward(
+      {
+        vm: vm.name || vm.vm_id,
+        ssh_command: vm.ssh_command,
+        ssh_host: vm.ssh_host,
+        public_host: vm.ssh_host,
+        ssh_port: vm.ssh_port,
+        ssh_user: vm.ssh_user,
+        external_endpoint: vm.external_ip,
+        credential_hint: vm.ssh_credential_hint,
+        target_ip: vm.ssh_target_ip,
+      },
+      vm
+    );
+  }
+
+  const forwards = slice?.nat?.ssh_forwards || [];
+  const legacyForward =
+    forwards.find((item) => item.vm === vm.name || item.vm === vm.vm_id) || null;
+
+  return normalizeSshForward(legacyForward, vm);
+}
+
+function sshCommandText(forward) {
+  if (!forward) return null;
+  const host = forward.public_host || forward.ssh_host || forward.headnode_ip;
+  const port = forward.ssh_port;
+  const user = forward.ssh_user || "ubuntu";
+  if (host && port) return `ssh -p ${port} ${user}@${host}`;
+  return forward.ssh_command || null;
+}
+
 function renderVmCard(slice, vm) {
+  const sshForward = getVmSshForward(slice, vm);
+  const sshText = sshCommandText(sshForward);
+
   // Badge de internet (pequeño, al lado del estado)
   const internetBadge = vm.internet
     ? h(
@@ -464,7 +601,10 @@ function renderVmCard(slice, vm) {
       vm.image_name ? detailRow("Imagen", vm.image_name) : null,
       vm.vnc_port ? detailRow("VNC port", vm.vnc_port) : null,
       vm.console_url ? detailRow("Consola", "noVNC (OpenStack)") : null,
-      vm.external_ip ? detailRow("IP externa", vm.external_ip) : null
+      vm.external_ip ? detailRow("IP externa", vm.external_ip) : null,
+      sshText ? detailRow("SSH externo", sshText) : null,
+      sshForward?.target_ip ? detailRow("SSH destino", `${sshForward.target_ip}:22`) : null,
+      sshForward?.credential_hint ? detailRow("Credencial SSH", sshForward.credential_hint) : null
     )
   );
 
@@ -531,6 +671,55 @@ function actionButton(sliceName, vmName, action, label) {
   );
 }
 
+async function handleExportSlice(sliceName) {
+  try {
+    const payload = await SliceApi.exportGraphSlice(sliceName);
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${sliceName}.topology.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Topología "${sliceName}" exportada`, "success");
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function handleCloneSlice(sliceName) {
+  const newName = window.prompt("Nombre del nuevo borrador:", `${sliceName}-copia`)?.trim();
+  if (!newName) return;
+  try {
+    await SliceApi.cloneGraphSlice(sliceName, newName);
+    showToast(`Slice clonado como borrador "${newName}"`, "success");
+    navigate(`/slices/${encodeURIComponent(newName)}/edit`);
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function handleDeployDraft(sliceName, container) {
+  const confirmed = await confirmDialog({
+    title: "Desplegar borrador",
+    message: `Se crearán las VMs, redes y recursos físicos del slice "${sliceName}".`,
+    confirmLabel: "Desplegar",
+  });
+  if (!confirmed) return;
+  try {
+    await SliceApi.deployDraft(sliceName);
+    showToast("Borrador encolado para despliegue", "info");
+    container.innerHTML = "";
+    renderPendingState(container, { state: "queued" }, sliceName);
+  } catch (err) {
+    showError(err);
+  }
+}
+
 async function handleDeleteSlice(sliceName, container) {
   const confirmed = await confirmDialog({
     title: "Borrar slice",
@@ -541,13 +730,14 @@ async function handleDeleteSlice(sliceName, container) {
   if (!confirmed) return;
 
   try {
-    await SliceApi.deleteGraphSlice(sliceName);
-    showToast("Borrado encolado, esto puede tardar unos segundos…", "info");
+    const result = await SliceApi.deleteGraphSlice(sliceName);
+    if (result?.immediate || result?.status === "deleted") {
+      showToast("Borrador eliminado", "success");
+      navigate("/slices");
+      return;
+    }
 
-    // No usamos navigate() aquí: ya estamos en /slices/{sliceName}, así que
-    // navegar a la misma ruta es un no-op para el router (no re-renderiza).
-    // En su lugar, mostramos el estado "deleting" directamente en el
-    // contenedor actual, igual que si hubiéramos recargado la página.
+    showToast("Borrado encolado, esto puede tardar unos segundos…", "info");
     container.innerHTML = "";
     renderPendingState(container, { state: "deleting" }, sliceName);
   } catch (err) {

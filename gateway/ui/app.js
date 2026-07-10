@@ -27,6 +27,7 @@ if (!requireAuth()) {
   registerRoute("/", renderDashboard);
   registerRoute("/slices", renderSlicesList);
   registerRoute("/slices/new", renderSliceEditor);
+  registerRoute("/slices/:name/edit", renderSliceEditor);
   registerRoute("/slices/:name", renderSliceDetail);
   registerRoute("/monitoring", renderMonitoring);
   registerRoute("/admin/users", renderAdminUsers);

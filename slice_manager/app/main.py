@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import os
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
@@ -10,7 +12,11 @@ from app.graph_orchestrator import run_create_graph_slice_job, run_delete_graph_
 
 from .auth import require_token
 from .graph_orchestrator import GraphOrchestrator
-from .graph_schemas import GraphSliceCreateRequest
+from .graph_schemas import (
+    GraphSliceCloneRequest,
+    GraphSliceCreateRequest,
+    GraphSliceImportRequest,
+)
 from .orchestrator import Orchestrator
 from .rbac import (
     assert_can_act,
@@ -31,7 +37,7 @@ from .state_store import (
     next_free_vlan_base,
 )
 
-app = FastAPI(title="PUCP Slice Manager", version="0.5.0")
+app = FastAPI(title="PUCP Slice Manager", version="0.6.0")
 
 orchestrator = Orchestrator()
 graph_orchestrator = GraphOrchestrator()
@@ -333,12 +339,339 @@ async def delete_slice(slice_name: str, user: dict = Depends(require_write_acces
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Graph slices (topologías arbitrarias) — creación/borrado vía cola RQ
+# Graph slices (topologías arbitrarias) — borradores + biblioteca + cola RQ
 # ════════════════════════════════════════════════════════════════════════════
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _ensure_slice_name_available(slice_name: str, *, ignore_name: str | None = None) -> None:
+    for item in list_slices():
+        current = item.get("slice_name")
+        if current == slice_name and current != ignore_name:
+            raise HTTPException(status_code=409, detail="Ya existe un slice con ese nombre")
+
+
+def _payload_topology(payload: GraphSliceCreateRequest) -> dict:
+    raw = payload.model_dump(by_alias=True)
+    raw.pop("owner_username", None)
+    raw.pop("curso_id", None)
+    return raw
+
+
+def _draft_record(
+    payload: GraphSliceCreateRequest,
+    *,
+    owner_username: str,
+    owner_uid,
+    curso_id: int | None,
+    created_by: str,
+    created_at: str | None = None,
+) -> dict:
+    topology = _payload_topology(payload.model_copy(update={"vlan_base": None}))
+    return {
+        "mode": "graph",
+        "state": "draft",
+        **topology,
+        "owner_username": owner_username,
+        "owner_uid": owner_uid,
+        "curso_id": curso_id,
+        "created_by": created_by,
+        "created_at": created_at or _utcnow(),
+        "updated_at": _utcnow(),
+    }
+
+
+def _queued_record(
+    payload: GraphSliceCreateRequest,
+    *,
+    owner_username: str,
+    owner_uid,
+    curso_id: int | None,
+    created_by: str,
+    created_at: str | None = None,
+) -> dict:
+    return {
+        "mode": "graph",
+        "state": "queued",
+        **_payload_topology(payload),
+        "owner_username": owner_username,
+        "owner_uid": owner_uid,
+        "curso_id": curso_id,
+        "created_by": created_by,
+        "created_at": created_at or _utcnow(),
+        "updated_at": _utcnow(),
+    }
+
+
+def _normalise_topology_from_slice(found: dict, *, new_name: str | None = None) -> dict:
+    """Convierte un draft o slice activo a GraphSliceCreateRequest portable."""
+    cluster = found.get("cluster", "linux")
+    source_nodes = found.get("nodes") or found.get("vms") or []
+    nodes = []
+    for node in source_nodes:
+        nodes.append({
+            "name": node.get("name") or node.get("vm_id"),
+            "image_name": node.get("image_name") or ("cirros" if cluster == "openstack" else "cirros-base.img"),
+            "vcpus": int(node.get("vcpus") or 1),
+            "ram_mb": int(node.get("ram_mb") or 256),
+            "disk_gb": int(node.get("disk_gb") or 10),
+            "preferred_worker": node.get("preferred_worker"),
+            "internet": bool(node.get("internet", False)),
+        })
+
+    links = []
+    for idx, link in enumerate(found.get("links") or []):
+        from_node = link.get("from") or link.get("from_node") or link.get("node_a")
+        to_node = link.get("to") or link.get("to_node") or link.get("node_b")
+        if from_node and to_node:
+            links.append({
+                "id": link.get("id") or f"link{idx + 1}",
+                "from": from_node,
+                "to": to_node,
+            })
+
+    topology = {
+        "slice_name": new_name or found["slice_name"],
+        # La VLAN física no se exporta/reserva: se reasigna al desplegar.
+        "vlan_base": None,
+        "vnc_start": int(found.get("vnc_start") or 5901),
+        "network_backend": found.get("network_backend", "vlan"),
+        "internet_mode": found.get("internet_mode", "none"),
+        "cluster": cluster,
+        "availability_zone": found.get("availability_zone"),
+        "nodes": nodes,
+        "links": links,
+    }
+    # Valida y normaliza antes de entregar/exportar/clonar.
+    return GraphSliceCreateRequest(**topology).model_dump(by_alias=True)
+
+
+def _assign_vlan_for_deploy(
+    payload: GraphSliceCreateRequest,
+    *,
+    ignore_name: str | None = None,
+) -> GraphSliceCreateRequest:
+    if payload.vlan_base is None:
+        try:
+            assigned_vlan = next_free_vlan_base(len(payload.links))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return payload.model_copy(update={"vlan_base": assigned_vlan})
+
+    requested_top = payload.vlan_base + len(payload.links) - 1
+    for item in list_slices():
+        if item.get("slice_name") == ignore_name:
+            continue
+        existing_base = item.get("vlan_base")
+        if not existing_base:
+            continue
+        existing_links = len(item.get("links") or [])
+        existing_top = existing_base + max(existing_links - 1, 0)
+        if not (requested_top < existing_base or payload.vlan_base > existing_top):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"La VLAN base {payload.vlan_base} solapa con el slice "
+                    f"'{item['slice_name']}' (VLANs {existing_base}–{existing_top})."
+                ),
+            )
+    return payload
+
+
+def _enqueue_create_job(
+    payload: GraphSliceCreateRequest,
+    *,
+    owner_username: str,
+    owner_uid,
+    curso_id: int | None,
+    created_by: str,
+):
+    return slice_queue.enqueue(
+        run_create_graph_slice_job,
+        payload.model_dump(),
+        owner_username,
+        owner_uid,
+        curso_id,
+        created_by,
+        job_id=f"create-{payload.slice_name}",
+    )
+
+
 @app.get("/graph-slices")
 def get_graph_slices(user: dict = Depends(current_user)):
     all_graph = [s for s in list_slices() if s.get("mode") == "graph"]
     return filter_slices_for_user(user, all_graph)
+
+
+@app.post("/graph-slices/drafts", status_code=201)
+async def create_graph_slice_draft(
+    payload: GraphSliceCreateRequest,
+    user: dict = Depends(require_write_access),
+):
+    _ensure_slice_name_available(payload.slice_name)
+    owner_username, curso_id = resolve_owner_for_create(
+        user, payload.owner_username, payload.curso_id
+    )
+    owner_uid = user["uid"] if owner_username == user["sub"] else None
+    payload = payload.model_copy(update={"vlan_base": None})
+    record = _draft_record(
+        payload,
+        owner_username=owner_username,
+        owner_uid=owner_uid,
+        curso_id=curso_id,
+        created_by=user["sub"],
+    )
+    try:
+        add_slice(record)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return record
+
+
+@app.put("/graph-slices/drafts/{slice_name}")
+async def update_graph_slice_draft(
+    slice_name: str,
+    payload: GraphSliceCreateRequest,
+    user: dict = Depends(require_write_access),
+):
+    found = get_slice(slice_name)
+    if not found:
+        raise HTTPException(status_code=404, detail="Borrador no encontrado")
+    if found.get("mode") != "graph" or found.get("state") != "draft":
+        raise HTTPException(status_code=409, detail="Solo se pueden editar slices en estado draft")
+    assert_can_act(user, found)
+    if payload.slice_name != slice_name:
+        raise HTTPException(
+            status_code=409,
+            detail="El nombre de un borrador existente no se cambia; usa Clonar para otro nombre",
+        )
+
+    payload = payload.model_copy(update={"vlan_base": None})
+    record = _draft_record(
+        payload,
+        owner_username=found.get("owner_username") or user["sub"],
+        owner_uid=found.get("owner_uid"),
+        curso_id=found.get("curso_id"),
+        created_by=found.get("created_by") or user["sub"],
+        created_at=found.get("created_at"),
+    )
+    replace_slice(slice_name, record)
+    return record
+
+
+@app.post("/graph-slices/drafts/{slice_name}/deploy", status_code=202)
+async def deploy_graph_slice_draft(
+    slice_name: str,
+    user: dict = Depends(require_write_access),
+):
+    found = get_slice(slice_name)
+    if not found:
+        raise HTTPException(status_code=404, detail="Borrador no encontrado")
+    if found.get("mode") != "graph" or found.get("state") != "draft":
+        raise HTTPException(status_code=409, detail="El slice no está en estado draft")
+    assert_can_act(user, found)
+
+    payload = GraphSliceCreateRequest(**_normalise_topology_from_slice(found))
+    payload = _assign_vlan_for_deploy(payload, ignore_name=slice_name)
+    queued = _queued_record(
+        payload,
+        owner_username=found.get("owner_username") or user["sub"],
+        owner_uid=found.get("owner_uid"),
+        curso_id=found.get("curso_id"),
+        created_by=found.get("created_by") or user["sub"],
+        created_at=found.get("created_at"),
+    )
+    replace_slice(slice_name, queued)
+    try:
+        job = _enqueue_create_job(
+            payload,
+            owner_username=queued["owner_username"],
+            owner_uid=queued.get("owner_uid"),
+            curso_id=queued.get("curso_id"),
+            created_by=queued["created_by"],
+        )
+    except Exception as exc:
+        replace_slice(slice_name, found)
+        raise HTTPException(status_code=503, detail=f"No se pudo encolar el despliegue: {exc}") from exc
+
+    return {"slice_name": slice_name, "job_id": job.id, "status": "queued"}
+
+
+@app.get("/graph-slices/{slice_name}/export")
+def export_graph_slice(slice_name: str, user: dict = Depends(current_user)):
+    found = get_slice(slice_name)
+    if not found or found.get("mode") != "graph":
+        raise HTTPException(status_code=404, detail="Graph slice no encontrado")
+    assert_can_view(user, found)
+    return {
+        "schema_version": "1.0",
+        "kind": "pucp-private-cloud-topology",
+        "exported_at": _utcnow(),
+        "source_slice": slice_name,
+        "topology": _normalise_topology_from_slice(found),
+    }
+
+
+@app.post("/graph-slices/import", status_code=201)
+async def import_graph_slice(
+    payload: GraphSliceImportRequest,
+    user: dict = Depends(require_write_access),
+):
+    topology = payload.topology
+    new_name = payload.new_slice_name or topology.slice_name
+    topology = topology.model_copy(update={"slice_name": new_name, "vlan_base": None})
+    _ensure_slice_name_available(new_name)
+
+    owner_username, curso_id = resolve_owner_for_create(
+        user, topology.owner_username, topology.curso_id
+    )
+    owner_uid = user["uid"] if owner_username == user["sub"] else None
+    record = _draft_record(
+        topology,
+        owner_username=owner_username,
+        owner_uid=owner_uid,
+        curso_id=curso_id,
+        created_by=user["sub"],
+    )
+    try:
+        add_slice(record)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return record
+
+
+@app.post("/graph-slices/{slice_name}/clone", status_code=201)
+async def clone_graph_slice(
+    slice_name: str,
+    payload: GraphSliceCloneRequest,
+    user: dict = Depends(require_write_access),
+):
+    found = get_slice(slice_name)
+    if not found or found.get("mode") != "graph":
+        raise HTTPException(status_code=404, detail="Graph slice no encontrado")
+    assert_can_view(user, found)
+    _ensure_slice_name_available(payload.new_slice_name)
+
+    topology_dict = _normalise_topology_from_slice(
+        found, new_name=payload.new_slice_name
+    )
+    topology = GraphSliceCreateRequest(**topology_dict)
+    owner_username, curso_id = resolve_owner_for_create(user, None, None)
+    owner_uid = user["uid"] if owner_username == user["sub"] else None
+    record = _draft_record(
+        topology,
+        owner_username=owner_username,
+        owner_uid=owner_uid,
+        curso_id=curso_id,
+        created_by=user["sub"],
+    )
+    try:
+        add_slice(record)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return record
 
 
 @app.post("/graph-slices", status_code=202)
@@ -346,84 +679,44 @@ async def create_graph_slice(
     payload: GraphSliceCreateRequest,
     user: dict = Depends(require_write_access),
 ):
-    if any(s["slice_name"] == payload.slice_name for s in list_slices()):
-        raise HTTPException(status_code=409, detail="Ya existe un slice con ese nombre")
-
-    # ─── Asignación automática de VLAN base (SIN CAMBIOS, se queda síncrona) ──
-    if payload.vlan_base is None:
-        links_needed = len(payload.links)
-        try:
-            assigned_vlan = next_free_vlan_base(links_needed)
-        except ValueError as e:
-            raise HTTPException(status_code=409, detail=str(e))
-        payload = payload.model_copy(update={"vlan_base": assigned_vlan})
-    else:
-        requested_top = payload.vlan_base + len(payload.links) - 1
-        for s in list_slices():
-            existing_base = s.get("vlan_base")
-            if not existing_base:
-                continue
-            existing_links = len(s.get("links") or [])
-            existing_top = existing_base + max(existing_links - 1, 0)
-            if not (requested_top < existing_base or payload.vlan_base > existing_top):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"La VLAN base {payload.vlan_base} solapa con el slice "
-                        f"'{s['slice_name']}' (VLANs {existing_base}–{existing_top})."
-                    ),
-                )
+    _ensure_slice_name_available(payload.slice_name)
+    payload = _assign_vlan_for_deploy(payload)
 
     owner_username, curso_id = resolve_owner_for_create(
         user, payload.owner_username, payload.curso_id
     )
     owner_uid = user["uid"] if owner_username == user["sub"] else None
-
-    # ─── Registrar el slice como "queued" ANTES de encolar ────────────────
-    # Así GET /graph-slices ya lo lista (con estado visible) desde el
-    # instante en que se acepta la request, sin esperar al worker.
-    add_slice({
-        "mode": "graph",
-        "state": "queued",
-        "slice_name": payload.slice_name,
-        "cluster": payload.cluster,
-        "vlan_base": payload.vlan_base,
-        "owner_username": owner_username,
-        "owner_uid": owner_uid,
-        "curso_id": curso_id,
-        "created_by": user["sub"],
-    })
-
-    # ─── Encolar el deploy real ────────────────────────────────────────────
-    job = slice_queue.enqueue(
-        run_create_graph_slice_job,
-        payload.model_dump(),
-        owner_username,
-        owner_uid,
-        curso_id,
-        user["sub"],
-        job_id=f"create-{payload.slice_name}",  # ID predecible para polling
+    queued = _queued_record(
+        payload,
+        owner_username=owner_username,
+        owner_uid=owner_uid,
+        curso_id=curso_id,
+        created_by=user["sub"],
     )
+    try:
+        add_slice(queued)
+        job = _enqueue_create_job(
+            payload,
+            owner_username=owner_username,
+            owner_uid=owner_uid,
+            curso_id=curso_id,
+            created_by=user["sub"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        remove_slice(payload.slice_name)
+        raise HTTPException(status_code=503, detail=f"No se pudo encolar el despliegue: {exc}") from exc
 
-    return {
-        "slice_name": payload.slice_name,
-        "job_id": job.id,
-        "status": "queued",
-    }
+    return {"slice_name": payload.slice_name, "job_id": job.id, "status": "queued"}
 
 
 @app.get("/graph-slices/{slice_name}/job-status")
 def get_slice_job_status(slice_name: str, user: dict = Depends(current_user)):
-    """
-    Polling de estado para un deploy o borrado en curso.
-    Usado por la UI para mostrar el badge de progreso en slice-detail.js.
-
-    Si el job ya expiró del TTL de Redis (terminó hace rato), cae a
-    state_store como fuente de verdad de respaldo.
-    """
     found = get_slice(slice_name)
+    if found:
+        assert_can_view(user, found)
 
-    # Probar primero como job de creación, luego como job de borrado.
     for prefix in ("create", "delete"):
         status = get_job_status(f"{prefix}-{slice_name}")
         if status["status"] != "not_found":
@@ -431,7 +724,7 @@ def get_slice_job_status(slice_name: str, user: dict = Depends(current_user)):
 
     if found:
         return {"status": found.get("state", "unknown"), "slice": found}
-    raise HTTPException(status_code=404, detail="Slice no encontrado")
+    return {"status": "not_found"}
 
 
 @app.delete("/graph-slices/{slice_name}", status_code=202)
@@ -446,18 +739,18 @@ async def delete_graph_slice(
         raise HTTPException(status_code=400, detail="El slice indicado no es de modo graph")
     assert_can_act(user, found)
 
-    # Marcar como "deleting" en lugar de borrar el registro de inmediato —
-    # el borrado real del registro lo hace el worker al terminar (o lo deja
-    # visible con error si el driver físico falla).
-    replace_slice(slice_name, {**found, "state": "deleting"})
+    # Un draft no tiene infraestructura física; se elimina inmediatamente.
+    if found.get("state") == "draft":
+        remove_slice(slice_name)
+        return {"slice_name": slice_name, "status": "deleted", "immediate": True}
 
+    replace_slice(slice_name, {**found, "state": "deleting", "updated_at": _utcnow()})
     job = slice_queue.enqueue(
         run_delete_graph_slice_job,
         slice_name,
         found,
         job_id=f"delete-{slice_name}",
     )
-
     return {"slice_name": slice_name, "job_id": job.id, "status": "deleting"}
 
 

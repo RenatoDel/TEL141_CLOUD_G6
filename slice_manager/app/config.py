@@ -24,6 +24,11 @@ class Settings(BaseSettings):
 
     headnode_image_dir: str = "/var/lib/vms/images"
     worker_image_dir: str = "/var/lib/vms/images"
+
+    # Host/puerto publicados para acceso SSH externo a VMs Linux con internet=true.
+    # Si linux_ssh_public_host queda vacío, se usa headnode_ssh_host.
+    linux_ssh_public_host: str = ""
+    linux_ssh_start_port: int = 2200
     image_sync_cache_dir: str = "/tmp/pucp-image-cache"
 
     @property

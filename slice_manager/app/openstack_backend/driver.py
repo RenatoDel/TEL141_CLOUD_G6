@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from typing import Optional
 
 import httpx
@@ -56,6 +58,18 @@ def OS_IMAGE_NAME(): return os.environ.get("OS_IMAGE_NAME", "cirros")
 def OS_PHYSNET(): return os.environ.get("OS_PHYSNET", "physnet1")
 
 def OS_EXTERNAL_NETWORK_NAME(): return os.environ.get("OS_EXTERNAL_NETWORK_NAME", "external")
+
+def OS_OPENSTACK_PARALLEL_WORKERS() -> int:
+    """
+    Cantidad máxima de llamadas paralelas durante el despliegue OpenStack.
+    Por defecto usa 6 para no saturar Nova/Neutron en el lab.
+    Se puede ajustar con la variable de entorno OS_OPENSTACK_PARALLEL_WORKERS.
+    """
+    try:
+        return max(1, int(os.environ.get("OS_OPENSTACK_PARALLEL_WORKERS", "6")))
+    except ValueError:
+        return 6
+
 
 
 # Compute nodes reales de OpenStack (verificados con `openstack compute service list`).
@@ -927,14 +941,46 @@ class OpenStackDriver:
                 if dst in node_links:
                     node_links[dst].append(link_id)
 
-            # 6. Crear/reutilizar puertos y VMs
-            vm_results: list[dict] = []
+            # 6. Crear/reutilizar puertos y VMs en paralelo
+            #
+            # Antes: el driver hacía VM1 completa -> VM2 completa -> VM3 completa.
+            # Ahora: se lanza un trabajo por VM usando ThreadPoolExecutor.
+            # Cada trabajo ejecuta llamadas Neutron/Nova independientes:
+            #   - crear/reutilizar puertos
+            #   - crear/reutilizar servidor
+            #   - esperar ACTIVE
+            #   - obtener consola noVNC
+            #
+            # Esto mejora el tiempo total de despliegue y demuestra uso eficiente
+            # de APIs OpenStack en paralelo.
+            vm_results_by_index: dict[int, dict] = {}
+            created_lock = Lock()
 
-            for vm_index, node in enumerate(nodes):
+            def _cloud_init_for_internet() -> str:
+                return """#!/bin/sh
+# Configurar interfaz de internet automáticamente
+sleep 5
+
+# Intentar levantar todas las interfaces salvo loopback
+for IFACE in $(ls /sys/class/net | grep -v lo); do
+    sudo ip link set "$IFACE" up 2>/dev/null || true
+done
+
+# Intentar DHCP en interfaces adicionales
+for IFACE in $(ls /sys/class/net | grep -v lo); do
+    sudo udhcpc -i "$IFACE" -n -q -T 3 -t 2 2>/dev/null || true
+done
+
+# Fallback para gateway del rango OpenStack G6
+ip route | grep -q default || sudo ip route add default via 10.60.14.1 2>/dev/null || true
+"""
+
+            def _create_one_vm(vm_index: int, node: dict) -> tuple[int, dict]:
                 node_name = node["name"]
                 port_ids: list[str] = []
                 node_ifaces: list[dict] = []
 
+                # 6.1 Puertos internos por enlace de la topología
                 for link_id in node_links[node_name]:
                     net_info = link_networks.get(link_id)
                     if not net_info:
@@ -946,7 +992,7 @@ class OpenStackDriver:
                     )
                     if existing_port:
                         port = existing_port
-                        slog.info("Puerto %s ya existe, reutilizando", port_name)
+                        slog.info("[parallel] Puerto %s ya existe, reutilizando", port_name)
                     else:
                         port = self.client.create_port(
                             port_name,
@@ -955,10 +1001,11 @@ class OpenStackDriver:
                             scoped_token,
                             project_id,
                         )
-                        created_ports.append({
-                            "port_id": port["id"],
-                            "token": scoped_token,
-                        })
+                        with created_lock:
+                            created_ports.append({
+                                "port_id": port["id"],
+                                "token": scoped_token,
+                            })
 
                     port_ids.append(port["id"])
                     fixed_ip = port["fixed_ips"][0]["ip_address"] if port.get("fixed_ips") else None
@@ -972,7 +1019,7 @@ class OpenStackDriver:
                         "cidr": net_info["cidr"],
                     })
 
-                # R5 — salida/entrada a Internet: puerto extra en la red 'external'
+                # 6.2 Puerto externo si la VM requiere internet/SSH externo
                 external_ip = None
                 if node.get("internet"):
                     ext_port = self._attach_internet_port(
@@ -984,10 +1031,11 @@ class OpenStackDriver:
                             ext_port["fixed_ips"][0]["ip_address"]
                             if ext_port.get("fixed_ips") else None
                         )
-                        created_ports.append({
-                            "port_id": ext_port["id"],
-                            "token": scoped_token,
-                        })
+                        with created_lock:
+                            created_ports.append({
+                                "port_id": ext_port["id"],
+                                "token": scoped_token,
+                            })
                         node_ifaces.append({
                             "link_id": "external",
                             "port_id": ext_port["id"],
@@ -998,8 +1046,7 @@ class OpenStackDriver:
                             "cidr": None,
                         })
 
-                # Placement: usar la asignación real del CP-SAT (placement_service)
-                # Cada worker tiene su propia availability zone dedicada (az-worker1, az-worker2, az-worker3)
+                # 6.3 Placement OpenStack: usar worker asignado por placement_service
                 worker = node.get("server", "")
                 az = f"az-{worker}" if worker else None
 
@@ -1008,31 +1055,14 @@ class OpenStackDriver:
                 )
                 if existing_server:
                     server_id = existing_server["id"]
-                    slog.info("VM %s ya existe (%s), reutilizando", node_name, server_id)
+                    slog.info("[parallel] VM %s ya existe (%s), reutilizando", node_name, server_id)
                 else:
                     slog.info(
-                        "Creando VM %s con %d puertos | AZ=%s",
+                        "[parallel] Creando VM %s con %d puertos | AZ=%s",
                         node_name, len(port_ids), az or "auto"
                     )
-                    # Si la VM tiene internet, inyectar script cloud-init
-                    # que levanta eth1 automáticamente al bootear.
-                    # Cirros ejecuta /etc/rc.local o user_data vía cloud-init.
-                    # El índice de la interfaz externa es siempre el último puerto.
-                    vm_user_data = None
-                    if node.get("internet"):
-                        # eth0 = puerto interno (VLAN), eth1 = puerto external
-                        # udhcpc en cirros necesita -R para aplicar rutas
-                        vm_user_data = """#!/bin/sh
-# Configurar interfaz de internet (eth1) automáticamente
-sleep 5
-sudo ip link set eth1 up
-sudo udhcpc -i eth1 -n -R -q 2>/dev/null || true
-# Agregar ruta por defecto si udhcpc no la configuró
-GW=$(ip route | grep default | awk '{print $3}' | head -1)
-if [ -z "$GW" ]; then
-    sudo ip route add default via 10.60.14.1 2>/dev/null || true
-fi
-"""
+
+                    vm_user_data = _cloud_init_for_internet() if node.get("internet") else None
 
                     server = self.client.create_server(
                         name=node_name,
@@ -1044,19 +1074,19 @@ fi
                         user_data=vm_user_data,
                     )
                     server_id = server["id"]
-                    created_servers.append({
-                        "server_id": server_id,
-                        "name": node_name,
-                        "token": scoped_token,
-                    })
+                    with created_lock:
+                        created_servers.append({
+                            "server_id": server_id,
+                            "name": node_name,
+                            "token": scoped_token,
+                        })
 
-                # Esperar ACTIVE (con renovación de token si tarda)
-                slog.info("Esperando ACTIVE para VM %s (%s)", node_name, server_id)
+                # 6.4 Esperar ACTIVE también en paralelo
+                slog.info("[parallel] Esperando ACTIVE para VM %s (%s)", node_name, server_id)
                 final_status = self.client.wait_for_server_active(
                     server_id, scoped_token, project_id
                 )
 
-                # Consola noVNC (con fallback legacy)
                 console_url = self.client.get_console_url(server_id, scoped_token)
 
                 vm_result = {
@@ -1077,7 +1107,35 @@ fi
                     "external_ip": external_ip,
                     "project_id": project_id,
                 }
-                vm_results.append(vm_result)
+                return vm_index, vm_result
+
+            max_workers = min(OS_OPENSTACK_PARALLEL_WORKERS(), max(1, len(nodes)))
+            slog.info(
+                "Despliegue OpenStack paralelo habilitado: %d VMs, max_workers=%d",
+                len(nodes), max_workers
+            )
+
+            print(
+                f"[OPENSTACK_PARALLEL] Despliegue OpenStack paralelo habilitado: "
+    		f"{len(nodes)} VMs, max_workers={max_workers}",
+    		flush=True,
+	    )
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(_create_one_vm, vm_index, node)
+                    for vm_index, node in enumerate(nodes)
+                ]
+
+                for future in as_completed(futures):
+                    vm_index, vm_result = future.result()
+                    vm_results_by_index[vm_index] = vm_result
+
+            # Mantener el orden original de las VMs para la UI/state_store
+            vm_results: list[dict] = [
+                vm_results_by_index[i]
+                for i in sorted(vm_results_by_index)
+            ]
 
             # 7. Construir links de salida
             links_out = []

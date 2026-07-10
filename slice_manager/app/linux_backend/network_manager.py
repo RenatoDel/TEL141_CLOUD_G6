@@ -231,31 +231,75 @@ class NetworkManager:
         return f"0x{h:08x}"
 
     def apply_slice_flows(self, slice_id: str, vlan_ids: list[int]):
+        """
+        Aplica reglas de seguridad L2 para un slice Linux.
+        
+        Reglas:
+        - Permite tráfico únicamente en las VLANs asignadas al slice.
+        - Cada regla queda marcada con un cookie derivado del slice_id.
+        - Bloquea tráfico sin VLAN para evitar fugas entre slices.
+        """
         if not vlan_ids:
             return
+
+        vlan_ids = sorted(set(int(v) for v in vlan_ids))
         cmds = []
+
         for vlan_id in vlan_ids:
             cookie = self._ovs_cookie(slice_id, vlan_id)
+
+            cmds.append(
+                f"ovs-ofctl add-flow {OVS_BRIDGE} "
+                f"\"cookie={cookie},priority=200,dl_vlan={vlan_id},arp,actions=normal\""
+            )
+
+            cmds.append(
+                f"ovs-ofctl add-flow {OVS_BRIDGE} "
+                f"\"cookie={cookie},priority=200,dl_vlan={vlan_id},ip,actions=normal\""
+            )
+
             cmds.append(
                 f"ovs-ofctl add-flow {OVS_BRIDGE} "
                 f"\"cookie={cookie},priority=100,dl_vlan={vlan_id},actions=normal\""
             )
+
+        # Drop defensivo para tráfico sin etiqueta VLAN.
         drop_cookie = "0x00000001"
         cmds.append(
             f"ovs-ofctl add-flow {OVS_BRIDGE} "
-            f"\"cookie={drop_cookie},priority=1,dl_vlan=0xffff,actions=drop\" 2>/dev/null || true"
+            f"\"cookie={drop_cookie},priority=10,dl_vlan=0xffff,actions=drop\" 2>/dev/null || true"
         )
+
         script = "set -e\n" + "\n".join(cmds)
         self._sudo_bash(script)
 
+        print(
+            f"[LINUX_SECURITY] Reglas OVS aplicadas para slice={slice_id}, "
+            f"vlans={vlan_ids}",
+            flush=True,
+        )
+
     def remove_slice_flows(self, slice_id: str, vlan_ids: list[int]):
+        """
+        Elimina las reglas OVS asociadas al slice usando sus cookies.
+        """
         if not vlan_ids:
             return
+
+        vlan_ids = sorted(set(int(v) for v in vlan_ids))
         cmds = []
+
         for vlan_id in vlan_ids:
             cookie = self._ovs_cookie(slice_id, vlan_id)
             cmds.append(
                 f"ovs-ofctl del-flows {OVS_BRIDGE} \"cookie={cookie}/-1\" 2>/dev/null || true"
             )
+
         script = "\n".join(cmds)
-        self._sudo_bash(script)  
+        self._sudo_bash(script)
+
+        print(
+            f"[LINUX_SECURITY] Reglas OVS eliminadas para slice={slice_id}, "
+            f"vlans={vlan_ids}",
+            flush=True,
+        )

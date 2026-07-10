@@ -113,7 +113,7 @@ const TEMPLATES = [
   { key: "bus", label: "Bus" },
 ];
 
-export async function renderSliceEditor(container) {
+export async function renderSliceEditor(container, params = {}) {
   // Roles sin permiso de escritura (coach, alumno) no pueden estar aquí.
   // canWrite() ya devuelve false para ambos en la nueva auth.js.
   if (!canWrite()) {
@@ -122,6 +122,24 @@ export async function renderSliceEditor(container) {
   }
   const user = getUser();
   const role = getRole();
+  const editingDraftName = params?.name || null;
+  let initialDraft = null;
+
+  if (editingDraftName) {
+    try {
+      const slices = await SliceApi.listGraphSlices();
+      initialDraft = slices.find((s) => s.slice_name === editingDraftName) || null;
+    } catch (err) {
+      showError(err);
+      navigate("/slices");
+      return;
+    }
+    if (!initialDraft || initialDraft.state !== "draft") {
+      showToast("Solo se pueden editar slices guardados como borrador", "error");
+      navigate("/slices");
+      return;
+    }
+  }
 
   container.innerHTML = "";
   container.append(
@@ -131,11 +149,13 @@ export async function renderSliceEditor(container) {
       h(
         "div",
         {},
-        h("h1", {}, "Nuevo slice"),
+        h("h1", {}, initialDraft ? `Editar borrador: ${initialDraft.slice_name}` : "Nuevo slice"),
         h(
           "div",
           { class: "page-subtitle" },
-          "Diseña la topología y configura cada VM. Puedes combinar varias plantillas en un mismo slice."
+          initialDraft
+            ? "Edita la topología guardada. Los cambios no crean VMs hasta que pulses Desplegar."
+            : "Diseña la topología y configura cada VM. Puedes guardarla como borrador o desplegarla."
         )
       )
     )
@@ -146,6 +166,17 @@ export async function renderSliceEditor(container) {
 
   // ─── Canvas ──────────────────────────────────────────────────────────
   const canvasWrap = h("div", { class: "topo-canvas-wrap" });
+  const importInput = h("input", {
+    type: "file",
+    accept: ".json,application/json",
+    style: "display:none",
+    onChange: async (event) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (file) await importTopologyFile(file);
+    },
+  });
+
   const toolbar = h(
     "div",
     { class: "topo-toolbar" },
@@ -170,6 +201,11 @@ export async function renderSliceEditor(container) {
       "button",
       { class: "btn btn-ghost btn-sm", onClick: () => canvas.clear() },
       "Limpiar"
+    ),
+    h(
+      "button",
+      { class: "btn btn-ghost btn-sm", onClick: () => importInput.click() },
+      "Importar JSON"
     )
   );
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -181,13 +217,32 @@ export async function renderSliceEditor(container) {
     { class: "topo-help" },
     "Aplicar una plantilla con el canvas vacío lo inicializa. Aplicarla con nodos ya existentes AGREGA el subgrafo (para combinar topologías). Click en un nodo y luego en otro para conectar; doble click para editar; click en un enlace para borrarlo."
   );
-  canvasWrap.append(toolbar, svgScroll, helpBar);
+  canvasWrap.append(toolbar, importInput, svgScroll, helpBar);
   editorRoot.append(canvasWrap);
 
   const canvas = new TopologyCanvas(svg, {
     onChange: () => refreshNodeList(),
     onNodeEdit: (node) => openNodeEditModal(node),
   });
+
+  async function importTopologyFile(file) {
+    try {
+      const parsed = JSON.parse(await file.text());
+      const topology = parsed?.topology || parsed;
+      if (!topology || !Array.isArray(topology.nodes) || !Array.isArray(topology.links)) {
+        throw new Error("El JSON no contiene una topología válida con nodes y links");
+      }
+      const baseName = String(topology.slice_name || file.name.replace(/\.json$/i, "") || "topologia");
+      const suggested = `${baseName}-import`;
+      const newName = window.prompt("Nombre para el nuevo borrador importado:", suggested)?.trim();
+      if (!newName) return;
+      await SliceApi.importGraphSlice(topology, newName);
+      showToast(`Topología importada como borrador "${newName}"`, "success");
+      navigate(`/slices/${encodeURIComponent(newName)}/edit`);
+    } catch (err) {
+      showError(err);
+    }
+  }
 
   function promptTemplateCount(template) {
     openModal({
@@ -578,26 +633,40 @@ export async function renderSliceEditor(container) {
     });
   }
 
-  // Arrancamos con una plantilla lineal de 3 nodos para no dejar el canvas vacío.
-  canvas.loadTemplate("linear", 3);
+  if (initialDraft) {
+    canvas.loadFromGraph(initialDraft.nodes || [], initialDraft.links || []);
+  } else {
+    // Arrancamos con una plantilla lineal de 3 nodos para no dejar el canvas vacío.
+    canvas.loadTemplate("linear", 3);
+  }
 
   // ─── Panel de propiedades del slice ─────────────────────────────────
-  await renderPropsForm(propsCard, canvas, user, role);
+  await renderPropsForm(propsCard, canvas, user, role, initialDraft);
 }
 
-async function renderPropsForm(propsCard, canvas, user, role) {
+async function renderPropsForm(propsCard, canvas, user, role, initialDraft = null) {
   propsCard.innerHTML = "";
   propsCard.append(h("h3", {}, "Configuración del slice"));
 
   const form = h("form", {});
 
-  const nameField = fieldInput("slice-name", "Nombre del slice", "text", `slice-${Date.now()}`);
+  const nameField = fieldInput(
+    "slice-name",
+    "Nombre del slice",
+    "text",
+    initialDraft?.slice_name || `slice-${Date.now()}`
+  );
+  if (initialDraft) {
+    nameField.input.readOnly = true;
+    nameField.input.title = "Para crear otro nombre usa Clonar";
+  }
   const clusterField = fieldSelect("cluster-select", "Cluster", [
     { value: "linux", label: "Linux (KVM)" },
     { value: "openstack", label: "OpenStack" },
   ]);
 
   form.append(nameField.wrapper, clusterField.wrapper);
+  if (initialDraft?.cluster) clusterField.input.value = initialDraft.cluster;
 
   // Cuando cambia el cluster, normalizar imágenes incompatibles de nodos
   // existentes. P.ej. al pasar de Linux a OpenStack, "cirros-base.img" se
@@ -729,8 +798,36 @@ async function renderPropsForm(propsCard, canvas, user, role) {
     form.append(onBehalfBlock);
   }
 
-  const submitBtn = h("button", { type: "submit", class: "btn btn-primary w-full mt-md" }, "Crear slice");
-  form.append(submitBtn);
+  const saveBtn = h(
+    "button",
+    { type: "button", class: "btn btn-ghost w-full" },
+    initialDraft ? "Guardar cambios" : "Guardar borrador"
+  );
+  const submitBtn = h(
+    "button",
+    { type: "submit", class: "btn btn-primary w-full" },
+    initialDraft ? "Guardar y desplegar" : "Crear y desplegar"
+  );
+  form.append(
+    h(
+      "div",
+      { class: "flex gap-sm mt-md", style: "flex-direction:column" },
+      saveBtn,
+      submitBtn
+    )
+  );
+
+  saveBtn.addEventListener("click", async () => {
+    await handleSaveDraft({
+      canvas,
+      nameInput: nameField.input,
+      clusterInput: clusterField.input,
+      ownerSelect,
+      courseSelect,
+      saveBtn,
+      editingDraftName: initialDraft?.slice_name || null,
+    });
+  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -741,6 +838,7 @@ async function renderPropsForm(propsCard, canvas, user, role) {
       ownerSelect,
       courseSelect,
       submitBtn,
+      editingDraftName: initialDraft?.slice_name || null,
     });
   });
 
@@ -763,73 +861,120 @@ function fieldSelect(id, label, options) {
   return { wrapper, input };
 }
 
-async function handleSubmit({ canvas, nameInput, clusterInput, ownerSelect, courseSelect, submitBtn }) {
+function buildPayload({ canvas, nameInput, clusterInput, ownerSelect, courseSelect }) {
   const sliceName = nameInput.value.trim();
   const cluster = clusterInput.value;
 
   if (!sliceName) {
     showToast("El nombre del slice es requerido", "error");
-    return;
+    return null;
   }
   if (canvas.nodes.length < 2) {
     showToast("La topología debe tener al menos 2 nodos", "error");
-    return;
+    return null;
   }
   if (canvas.links.length < 1) {
     showToast("La topología debe tener al menos 1 enlace", "error");
-    return;
+    return null;
   }
 
   const nodes = canvas.toPayloadNodes();
-  const nodeNames = new Set(nodes.map(n => n.name));
-
-  // Filtrar links que referencien nodos borrados (p.ej. al borrar un nodo
-  // manualmente sin borrar sus enlaces, o al aplicar plantilla y luego
-  // borrar nodos). El backend rechaza con 422 si hay links huérfanos.
+  const nodeNames = new Set(nodes.map((n) => n.name));
   const rawLinks = canvas.toPayloadLinks();
-  const links = rawLinks.filter(l => nodeNames.has(l.from) && nodeNames.has(l.to));
+  const links = rawLinks.filter(
+    (link) => nodeNames.has(link.from) && nodeNames.has(link.to)
+  );
   if (links.length < rawLinks.length) {
-    const dropped = rawLinks.length - links.length;
     showToast(
-      `Se ignoraron ${dropped} enlace(s) que apuntaban a nodos eliminados.`,
+      `Se ignoraron ${rawLinks.length - links.length} enlace(s) huérfanos.`,
       "info"
     );
   }
 
-  // Si algún nodo tiene internet:true, activar headnode_nat automáticamente.
-  // Sin este campo el backend usa "none" y nunca crea la interfaz de salida.
-  const hasInternet = nodes.some(n => n.internet);
-
+  const hasInternet = nodes.some((node) => node.internet);
   const payload = {
     slice_name: sliceName,
-    // vlan_base omitido → el backend asigna automáticamente la siguiente libre
     cluster,
     nodes,
     links,
+    network_backend: "vlan",
     internet_mode: hasInternet ? "headnode_nat" : "none",
   };
 
-  if (ownerSelect && ownerSelect.value) {
-    payload.owner_username = ownerSelect.value;
+  if (ownerSelect?.value) payload.owner_username = ownerSelect.value;
+  if (courseSelect?.value) payload.curso_id = parseInt(courseSelect.value, 10);
+  return payload;
+}
+
+async function handleSaveDraft({
+  canvas,
+  nameInput,
+  clusterInput,
+  ownerSelect,
+  courseSelect,
+  saveBtn,
+  editingDraftName,
+}) {
+  const payload = buildPayload({
+    canvas,
+    nameInput,
+    clusterInput,
+    ownerSelect,
+    courseSelect,
+  });
+  if (!payload) return;
+
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Guardando…";
+  try {
+    if (editingDraftName) {
+      await SliceApi.updateDraft(editingDraftName, payload);
+    } else {
+      await SliceApi.createDraft(payload);
+    }
+    showToast(`Borrador "${payload.slice_name}" guardado`, "success");
+    navigate(`/slices/${encodeURIComponent(payload.slice_name)}`);
+  } catch (err) {
+    showError(err);
+    saveBtn.disabled = false;
+    saveBtn.textContent = editingDraftName ? "Guardar cambios" : "Guardar borrador";
   }
-  if (courseSelect && courseSelect.value) {
-    payload.curso_id = parseInt(courseSelect.value, 10);
-  }
+}
+
+async function handleSubmit({
+  canvas,
+  nameInput,
+  clusterInput,
+  ownerSelect,
+  courseSelect,
+  submitBtn,
+  editingDraftName,
+}) {
+  const payload = buildPayload({
+    canvas,
+    nameInput,
+    clusterInput,
+    ownerSelect,
+    courseSelect,
+  });
+  if (!payload) return;
 
   submitBtn.disabled = true;
-  submitBtn.textContent = "Creando…";
-
+  submitBtn.textContent = "Encolando…";
   try {
-    // El backend ahora encola el deploy (202 Accepted) y responde de
-    // inmediato con {slice_name, job_id, status:"queued"} — el deploy
-    // físico real corre en el worker RQ, no aquí. Navegamos directo al
-    // detalle, que se encarga de hacer polling y mostrar el progreso.
-    await SliceApi.createGraphSlice(payload);
-    showToast(`Slice "${sliceName}" encolado, desplegando…`, "info");
-    navigate(`/slices/${encodeURIComponent(sliceName)}`);
+    if (editingDraftName) {
+      await SliceApi.updateDraft(editingDraftName, payload);
+      await SliceApi.deployDraft(editingDraftName);
+    } else {
+      await SliceApi.createGraphSlice(payload);
+    }
+    showToast(`Slice "${payload.slice_name}" encolado, desplegando…`, "info");
+    navigate(`/slices/${encodeURIComponent(payload.slice_name)}`);
   } catch (err) {
     showError(err);
     submitBtn.disabled = false;
-    submitBtn.textContent = "Crear slice";
+    submitBtn.textContent = editingDraftName
+      ? "Guardar y desplegar"
+      : "Crear y desplegar";
   }
 }

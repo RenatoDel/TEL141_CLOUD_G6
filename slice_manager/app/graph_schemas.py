@@ -33,22 +33,14 @@ class GraphLinkSpec(BaseModel):
 
 class GraphSliceCreateRequest(BaseModel):
     slice_name: str = Field(min_length=1, max_length=100)
-    # vlan_base es opcional: si no se especifica (o se envía null/0), el
-    # backend asigna automáticamente la siguiente VLAN libre via next_free_vlan_base().
-    # Si se especifica, se usa ese valor (permite que admins fijen una VLAN concreta).
     vlan_base: Optional[int] = Field(default=None, ge=100, le=3990)
     vnc_start: int = Field(default=5901, ge=5901, le=65000)
     network_backend: Literal["vlan", "vxlan"] = "vlan"
     internet_mode: Literal["none", "headnode_nat", "provider_network"] = "none"
 
-    # Selección de cluster
     cluster: Literal["linux", "openstack"] = "linux"
     availability_zone: Optional[str] = None
 
-    # ─── Ownership / curso (opcionales, controlados por RBAC) ─────────────
-    # Si se omiten: el dueño es el caller y curso_id queda en None.
-    # admin/profesor pueden setear owner_username distinto al caller.
-    # profesor: el curso_id debe ser uno que dicta.
     owner_username: Optional[str] = None
     curso_id: Optional[int] = None
 
@@ -74,9 +66,13 @@ class GraphSliceCreateRequest(BaseModel):
         node_set = set(node_names)
         for link in self.links:
             if link.from_node not in node_set:
-                raise ValueError(f"El enlace {link.id} usa un nodo inexistente: {link.from_node}")
+                raise ValueError(
+                    f"El enlace {link.id} usa un nodo inexistente: {link.from_node}"
+                )
             if link.to_node not in node_set:
-                raise ValueError(f"El enlace {link.id} usa un nodo inexistente: {link.to_node}")
+                raise ValueError(
+                    f"El enlace {link.id} usa un nodo inexistente: {link.to_node}"
+                )
 
         if self.internet_mode in {"headnode_nat", "provider_network"} and not any(
             n.internet for n in self.nodes
@@ -93,3 +89,16 @@ class GraphSliceCreateRequest(BaseModel):
                 object.__setattr__(self, "cluster", "linux")
 
         return self
+
+
+class GraphSliceImportRequest(BaseModel):
+    """Importa una definición exportada y la guarda como borrador."""
+
+    topology: GraphSliceCreateRequest
+    new_slice_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+
+
+class GraphSliceCloneRequest(BaseModel):
+    """Crea un nuevo borrador copiando un slice visible."""
+
+    new_slice_name: str = Field(min_length=1, max_length=100)

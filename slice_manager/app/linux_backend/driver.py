@@ -212,8 +212,16 @@ class LinuxDriver:
         sync = self._sync_image_for_targets(image_name, sorted(set(servers)))
         return sync, sync["record"]["stored_filename"]
 
-    def _graph_vm_payload(self, *, node: dict, status: str, error: str | None, interfaces: list[dict]) -> dict:
-        return {
+    def _graph_vm_payload(
+        self,
+        *,
+        node: dict,
+        status: str,
+        error: str | None,
+        interfaces: list[dict],
+        ssh_forward: dict | None = None,
+    ) -> dict:
+        payload = {
             "vm_id": node["name"],
             "name": node["name"],
             "server": node["server"],
@@ -231,6 +239,43 @@ class LinuxDriver:
             "stored_filename": node.get("resolved_image_name"),
             "image_sync": node.get("image_sync"),
         }
+
+        if ssh_forward:
+            payload.update(
+                {
+                    "ssh_host": ssh_forward.get("public_host") or ssh_forward.get("headnode_ip"),
+                    "ssh_port": ssh_forward.get("ssh_port"),
+                    "ssh_user": ssh_forward.get("ssh_user"),
+                    "ssh_command": ssh_forward.get("ssh_command"),
+                    "ssh_target_ip": ssh_forward.get("target_ip"),
+                    "ssh_target_port": ssh_forward.get("target_port", 22),
+                    "ssh_credential_hint": ssh_forward.get("credential_hint"),
+                    "external_ip": ssh_forward.get("external_endpoint"),
+                }
+            )
+
+        if ssh_forward:
+            payload["ssh_access_mode"] = (
+                ssh_forward.get("access_mode")
+                or ssh_forward.get("ssh_access_mode")
+            )
+            payload["ssh_jump_user"] = (
+                ssh_forward.get("jump_user")
+                or ssh_forward.get("ssh_jump_user")
+            )
+            payload["ssh_jump_host"] = (
+                ssh_forward.get("jump_host")
+                or ssh_forward.get("ssh_jump_host")
+                or ssh_forward.get("public_host")
+            )
+            payload["ssh_jump_port"] = (
+                ssh_forward.get("jump_port")
+                or ssh_forward.get("ssh_jump_port")
+            )
+            if payload.get("ssh_access_mode") == "proxyjump" and payload.get("ssh_jump_port"):
+                payload["ssh_port"] = payload["ssh_jump_port"]
+
+        return payload
 
     # =========================
     # LEGACY MODE
@@ -551,6 +596,20 @@ class LinuxDriver:
                 return value
         return fallback
 
+    def _graph_ssh_user_for_node(self, node: dict) -> str:
+        image = str(node.get("resolved_image_name") or node.get("image_name") or "").lower()
+        if "cirros" in image:
+            return "cirros"
+        return "ubuntu"
+
+    def _graph_ssh_credential_hint_for_node(self, node: dict) -> str | None:
+        image = str(node.get("resolved_image_name") or node.get("image_name") or "").lower()
+        if "cirros" in image:
+            return "cirros / gocubsgo"
+        if "ubuntu" in image:
+            return "ubuntu / ubuntu"
+        return None
+
     def _graph_nat_ip_for_node(self, node_name: str, node_interfaces: dict[str, list[dict]]) -> str | None:
         for iface in node_interfaces.get(node_name, []):
             if iface.get("link_id") != "nat":
@@ -564,6 +623,27 @@ class LinuxDriver:
 
         return None
 
+    def _graph_worker_public_port(self, worker_name: str) -> int:
+        import json
+        import os
+        import re
+
+        raw = getattr(settings, "workers_json", "") or os.environ.get("WORKERS_JSON", "")
+
+        try:
+            workers = json.loads(raw or "[]")
+            for item in workers:
+                if str(item.get("name")) == str(worker_name):
+                    return int(item.get("port") or item.get("ssh_port"))
+        except Exception:
+            pass
+
+        m = re.search(r"(\d+)$", str(worker_name))
+        if m:
+            return 5810 + int(m.group(1))
+
+        return int(getattr(settings, "headnode_ssh_port", 5814) or 5814)
+
     def _ensure_graph_ssh_forwards(
         self,
         headnode: SSHClient,
@@ -571,6 +651,12 @@ class LinuxDriver:
         nodes: list[dict],
         node_interfaces: dict[str, list[dict]],
     ) -> list[dict]:
+        """
+        Publica SSH externo sin alojar VMs en el headnode.
+
+        Flujo:
+          cliente -> headnode:puerto_publico -> worker:puerto_worker -> VM:22
+        """
         if not nat_meta or not nat_meta.get("enabled"):
             return []
 
@@ -578,43 +664,83 @@ class LinuxDriver:
         used_ports: set[int] = set()
 
         headnode_ip = settings.headnode_ssh_host
+        public_host = settings.linux_ssh_public_host or headnode_ip
+        base_port = int(getattr(settings, "linux_ssh_start_port", 2200) or 2200)
 
         for idx, node in enumerate(nodes, start=1):
             if not node.get("internet"):
                 continue
 
             vm_name = node["name"]
+            worker_name = node["server"]
             vm_ip = self._graph_nat_ip_for_node(vm_name, node_interfaces)
+
             if not vm_ip:
                 logger.warning("VM %s tiene internet=True pero no tiene IP NAT; no se publica SSH", vm_name)
                 continue
 
             vm_num = self._graph_vm_number(vm_name, idx)
-            ssh_port = 2200 + vm_num
+            ssh_port = base_port + vm_num
+
             while ssh_port in used_ports:
                 ssh_port += 100
 
             used_ports.add(ssh_port)
 
-            # Limpieza idempotente de reglas anteriores.
-            cleanup_cmds = [
+            ssh_user = self._graph_ssh_user_for_node(node)
+            credential_hint = self._graph_ssh_credential_hint_for_node(node)
+            jump_user = getattr(settings, "headnode_ssh_user", "ubuntu") or "ubuntu"
+            jump_host = public_host
+            jump_port = self._graph_worker_public_port(worker_name)
+            proxyjump_command = f"ssh -J {jump_user}@{jump_host}:{jump_port} {ssh_user}@{vm_ip}"
+            proxyjump_endpoint = f"{jump_host}:{jump_port} -> {vm_ip}:22"
+
+            with self._worker_client(worker_name) as worker_client:
+                worker_ip_cmd = "ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i==\"src\") {print $(i+1); exit}}'"
+                out, _ = worker_client.execute(worker_ip_cmd, raise_on_error=False)
+                worker_ip = (out or "").strip().split()[0] if (out or "").strip() else ""
+
+                try:
+                    ipaddress.ip_address(worker_ip)
+                except Exception as exc:
+                    raise RuntimeError(f"No se pudo resolver IP de gestión del worker {worker_name}: {worker_ip!r}") from exc
+
+                worker_cmds = [
+                    f"iptables -t nat -D PREROUTING -p tcp --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22 2>/dev/null || true",
+                    f"iptables -t nat -D OUTPUT -p tcp -d {worker_ip} --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22 2>/dev/null || true",
+                    f"iptables -t nat -D POSTROUTING -p tcp -d {vm_ip} --dport 22 -j MASQUERADE 2>/dev/null || true",
+                    f"iptables -D FORWARD -p tcp -d {vm_ip} --dport 22 -j ACCEPT 2>/dev/null || true",
+                    f"iptables -D FORWARD -p tcp -s {vm_ip} --sport 22 -j ACCEPT 2>/dev/null || true",
+                    "sysctl -w net.ipv4.ip_forward=1 >/dev/null",
+                    f"iptables -t nat -A PREROUTING -p tcp --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22",
+                    f"iptables -t nat -A OUTPUT -p tcp -d {worker_ip} --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22",
+                    f"iptables -t nat -A POSTROUTING -p tcp -d {vm_ip} --dport 22 -j MASQUERADE",
+                    f"iptables -I FORWARD -p tcp -d {vm_ip} --dport 22 -j ACCEPT",
+                    f"iptables -I FORWARD -p tcp -s {vm_ip} --sport 22 -j ACCEPT",
+                ]
+
+                worker_client.sudo("bash -lc " + repr(" ; ".join(worker_cmds)))
+
+            headnode_cmds = [
                 f"iptables -t nat -D PREROUTING -p tcp --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22 2>/dev/null || true",
                 f"iptables -t nat -D OUTPUT -p tcp -d {headnode_ip} --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22 2>/dev/null || true",
                 f"iptables -t nat -D POSTROUTING -p tcp -d {vm_ip} --dport 22 -j MASQUERADE 2>/dev/null || true",
                 f"iptables -D FORWARD -p tcp -d {vm_ip} --dport 22 -j ACCEPT 2>/dev/null || true",
                 f"iptables -D FORWARD -p tcp -s {vm_ip} --sport 22 -j ACCEPT 2>/dev/null || true",
-            ]
-
-            add_cmds = [
+                f"iptables -t nat -D PREROUTING -p tcp --dport {ssh_port} -j DNAT --to-destination {worker_ip}:{ssh_port} 2>/dev/null || true",
+                f"iptables -t nat -D OUTPUT -p tcp -d {headnode_ip} --dport {ssh_port} -j DNAT --to-destination {worker_ip}:{ssh_port} 2>/dev/null || true",
+                f"iptables -t nat -D POSTROUTING -p tcp -d {worker_ip} --dport {ssh_port} -j MASQUERADE 2>/dev/null || true",
+                f"iptables -D FORWARD -p tcp -d {worker_ip} --dport {ssh_port} -j ACCEPT 2>/dev/null || true",
+                f"iptables -D FORWARD -p tcp -s {worker_ip} --sport {ssh_port} -j ACCEPT 2>/dev/null || true",
                 "sysctl -w net.ipv4.ip_forward=1 >/dev/null",
-                f"iptables -t nat -A PREROUTING -p tcp --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22",
-                f"iptables -t nat -A OUTPUT -p tcp -d {headnode_ip} --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22",
-                f"iptables -t nat -A POSTROUTING -p tcp -d {vm_ip} --dport 22 -j MASQUERADE",
-                f"iptables -I FORWARD -p tcp -d {vm_ip} --dport 22 -j ACCEPT",
-                f"iptables -I FORWARD -p tcp -s {vm_ip} --sport 22 -j ACCEPT",
+                f"iptables -t nat -A PREROUTING -p tcp --dport {ssh_port} -j DNAT --to-destination {worker_ip}:{ssh_port}",
+                f"iptables -t nat -A OUTPUT -p tcp -d {headnode_ip} --dport {ssh_port} -j DNAT --to-destination {worker_ip}:{ssh_port}",
+                f"iptables -t nat -A POSTROUTING -p tcp -d {worker_ip} --dport {ssh_port} -j MASQUERADE",
+                f"iptables -I FORWARD -p tcp -d {worker_ip} --dport {ssh_port} -j ACCEPT",
+                f"iptables -I FORWARD -p tcp -s {worker_ip} --sport {ssh_port} -j ACCEPT",
             ]
 
-            headnode.sudo("bash -lc " + repr(" ; ".join(cleanup_cmds + add_cmds)))
+            headnode.sudo("bash -lc " + repr(" ; ".join(headnode_cmds)))
 
             forwards.append(
                 {
@@ -622,15 +748,30 @@ class LinuxDriver:
                     "target_ip": vm_ip,
                     "target_port": 22,
                     "headnode_ip": headnode_ip,
+                    "public_host": public_host,
                     "ssh_port": ssh_port,
-                    "ssh_command": f"ssh -p {ssh_port} ubuntu@{headnode_ip}",
+                    "ssh_user": ssh_user,
+                    "ssh_command": proxyjump_command,
+                    "external_endpoint": proxyjump_endpoint,
+                    "credential_hint": credential_hint,
+                    "access_mode": "proxyjump",
+                    "jump_user": jump_user,
+                    "jump_host": jump_host,
+                    "jump_port": jump_port,
+                    "worker": worker_name,
+                    "worker_ip": worker_ip,
+                    "worker_forward_port": ssh_port,
+                    "published_direct_port": ssh_port,
+                    "forward_mode": "headnode_to_worker_nat",
                 }
             )
 
             logger.info(
-                "SSH forward creado para %s: %s:%s -> %s:22",
+                "SSH forward distribuido para %s: %s:%s -> %s:%s -> %s:22",
                 vm_name,
-                headnode_ip,
+                public_host,
+                ssh_port,
+                worker_name,
                 ssh_port,
                 vm_ip,
             )
@@ -643,11 +784,27 @@ class LinuxDriver:
             vm_ip = item.get("target_ip")
             ssh_port = item.get("ssh_port")
             headnode_ip = item.get("headnode_ip", settings.headnode_ssh_host)
+            worker_name = item.get("worker")
+            worker_ip = item.get("worker_ip")
 
             if not vm_ip or not ssh_port:
                 continue
 
-            cmds = [
+            if worker_name:
+                try:
+                    with self._worker_client(worker_name) as worker_client:
+                        worker_cmds = [
+                            f"iptables -t nat -D PREROUTING -p tcp --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22 2>/dev/null || true",
+                            f"iptables -t nat -D OUTPUT -p tcp -d {worker_ip} --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22 2>/dev/null || true",
+                            f"iptables -t nat -D POSTROUTING -p tcp -d {vm_ip} --dport 22 -j MASQUERADE 2>/dev/null || true",
+                            f"iptables -D FORWARD -p tcp -d {vm_ip} --dport 22 -j ACCEPT 2>/dev/null || true",
+                            f"iptables -D FORWARD -p tcp -s {vm_ip} --sport 22 -j ACCEPT 2>/dev/null || true",
+                        ]
+                        worker_client.sudo("bash -lc " + repr(" ; ".join(worker_cmds)), raise_on_error=False)
+                except Exception as exc:
+                    logger.warning("No se pudo remover SSH forward en worker %s: %s", worker_name, exc)
+
+            headnode_cmds = [
                 f"iptables -t nat -D PREROUTING -p tcp --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22 2>/dev/null || true",
                 f"iptables -t nat -D OUTPUT -p tcp -d {headnode_ip} --dport {ssh_port} -j DNAT --to-destination {vm_ip}:22 2>/dev/null || true",
                 f"iptables -t nat -D POSTROUTING -p tcp -d {vm_ip} --dport 22 -j MASQUERADE 2>/dev/null || true",
@@ -655,8 +812,157 @@ class LinuxDriver:
                 f"iptables -D FORWARD -p tcp -s {vm_ip} --sport 22 -j ACCEPT 2>/dev/null || true",
             ]
 
-            headnode.sudo("bash -lc " + repr(" ; ".join(cmds)), raise_on_error=False)
+            if worker_ip:
+                headnode_cmds.extend(
+                    [
+                        f"iptables -t nat -D PREROUTING -p tcp --dport {ssh_port} -j DNAT --to-destination {worker_ip}:{ssh_port} 2>/dev/null || true",
+                        f"iptables -t nat -D OUTPUT -p tcp -d {headnode_ip} --dport {ssh_port} -j DNAT --to-destination {worker_ip}:{ssh_port} 2>/dev/null || true",
+                        f"iptables -t nat -D POSTROUTING -p tcp -d {worker_ip} --dport {ssh_port} -j MASQUERADE 2>/dev/null || true",
+                        f"iptables -D FORWARD -p tcp -d {worker_ip} --dport {ssh_port} -j ACCEPT 2>/dev/null || true",
+                        f"iptables -D FORWARD -p tcp -s {worker_ip} --sport {ssh_port} -j ACCEPT 2>/dev/null || true",
+                    ]
+                )
+
+            headnode.sudo("bash -lc " + repr(" ; ".join(headnode_cmds)), raise_on_error=False)
             logger.info("SSH forward removido: puerto %s hacia %s", ssh_port, vm_ip)
+
+    def _remove_graph_worker_gateways(self, nat: dict | None):
+        """
+        Cleanup robusto del NAT/DHCP creado en workers para Internet graph Linux.
+        Limpia dnsmasq, iptables, puerto OVS e interfaz Linux del gateway NAT.
+        """
+        if not nat:
+            return
+
+        import shlex
+
+        forwards = nat.get("ssh_forwards") or []
+        gateways = list(nat.get("worker_gateways") or [])
+
+        known_workers = {g.get("worker") for g in gateways if g.get("worker")}
+        for fw in forwards:
+            worker = fw.get("worker")
+            if worker and worker not in known_workers:
+                gateways.append(
+                    {
+                        "worker": worker,
+                        "ifname": nat.get("ifname"),
+                        "subnet_cidr": nat.get("subnet_cidr"),
+                        "reservations": nat.get("reservations") or [],
+                    }
+                )
+                known_workers.add(worker)
+
+        if not gateways:
+            logger.info("No hay worker_gateways que limpiar para NAT graph")
+            return
+
+        forwards_by_worker: dict[str, list[dict]] = {}
+        for fw in forwards:
+            worker = fw.get("worker")
+            if worker:
+                forwards_by_worker.setdefault(worker, []).append(fw)
+
+        for gateway in gateways:
+            worker_name = gateway.get("worker")
+            if not worker_name:
+                continue
+
+            ifname = gateway.get("ifname") or nat.get("ifname") or ""
+            subnet_cidr = gateway.get("subnet_cidr") or nat.get("subnet_cidr") or ""
+            reservations = gateway.get("reservations") or nat.get("reservations") or []
+
+            ips = [str(item.get("ip")) for item in reservations if item.get("ip")]
+            ports: list[int] = []
+            worker_ip = ""
+
+            for fw in forwards_by_worker.get(worker_name, []):
+                if fw.get("worker_ip"):
+                    worker_ip = str(fw.get("worker_ip"))
+
+                if fw.get("worker_forward_port"):
+                    ports.append(int(fw.get("worker_forward_port")))
+                elif fw.get("ssh_port"):
+                    ports.append(int(fw.get("ssh_port")))
+
+                if fw.get("target_ip") and str(fw.get("target_ip")) not in ips:
+                    ips.append(str(fw.get("target_ip")))
+
+            ifname_q = shlex.quote(ifname)
+            subnet_q = shlex.quote(subnet_cidr)
+            worker_ip_q = shlex.quote(worker_ip)
+            ips_q = shlex.quote(" ".join(sorted(set(ips))))
+            ports_q = shlex.quote(" ".join(str(p) for p in sorted(set(ports))))
+
+            shell = f"""
+set +e
+
+OUT_IF="$(ip route get 1.1.1.1 2>/dev/null | awk '{{for(i=1;i<=NF;i++) if ($i=="dev") {{print $(i+1); exit}}}}')"
+[ -n "$OUT_IF" ] || OUT_IF=ens3
+
+IFNAME={ifname_q}
+SUBNET={subnet_q}
+WORKER_IP={worker_ip_q}
+IPS={ips_q}
+PORTS={ports_q}
+
+if [ -n "$IFNAME" ]; then
+  PIDFILE="/var/run/dnsmasq-${{IFNAME}}.pid"
+  if [ -f "$PIDFILE" ]; then
+    PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+    case "$PID" in
+      ''|*[!0-9]*) ;;
+      *)
+        if ps -p "$PID" -o args= 2>/dev/null | grep -q 'dnsmasq'; then
+          sudo kill "$PID" 2>/dev/null || true
+        fi
+        ;;
+    esac
+  fi
+
+  sudo rm -f "/var/run/dnsmasq-${{IFNAME}}.conf"              "/var/run/dnsmasq-${{IFNAME}}.pid"              "/var/run/dnsmasq-${{IFNAME}}.leases"              "/var/log/dnsmasq-${{IFNAME}}.log" || true
+fi
+
+for PORT in $PORTS; do
+  for IP in $IPS; do
+    while sudo iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j DNAT --to-destination "$IP":22 2>/dev/null; do :; done
+    while sudo iptables -t nat -D POSTROUTING -d "$IP"/32 -p tcp --dport 22 -j MASQUERADE 2>/dev/null; do :; done
+    while sudo iptables -D FORWARD -d "$IP"/32 -p tcp --dport 22 -j ACCEPT 2>/dev/null; do :; done
+    while sudo iptables -D FORWARD -s "$IP"/32 -p tcp --sport 22 -j ACCEPT 2>/dev/null; do :; done
+
+    if [ -n "$WORKER_IP" ]; then
+      while sudo iptables -t nat -D OUTPUT -d "$WORKER_IP"/32 -p tcp --dport "$PORT" -j DNAT --to-destination "$IP":22 2>/dev/null; do :; done
+    fi
+  done
+done
+
+for IP in $IPS; do
+  while sudo iptables -t nat -D POSTROUTING -s "$IP"/32 -o "$OUT_IF" -j MASQUERADE 2>/dev/null; do :; done
+  while sudo iptables -D FORWARD -d "$IP"/32 -j ACCEPT 2>/dev/null; do :; done
+  while sudo iptables -D FORWARD -s "$IP"/32 -j ACCEPT 2>/dev/null; do :; done
+done
+
+if [ -n "$SUBNET" ]; then
+  while sudo iptables -t nat -D POSTROUTING -s "$SUBNET" -o "$OUT_IF" -j MASQUERADE 2>/dev/null; do :; done
+fi
+
+if [ -n "$IFNAME" ]; then
+  while sudo iptables -D FORWARD -i "$IFNAME" -o "$OUT_IF" -j ACCEPT 2>/dev/null; do :; done
+  while sudo iptables -D FORWARD -i "$OUT_IF" -o "$IFNAME" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+
+  sudo ovs-vsctl --if-exists del-port br-int "$IFNAME" || true
+  sudo ip link del "$IFNAME" 2>/dev/null || true
+fi
+
+exit 0
+"""
+
+            try:
+                with self._worker_client(worker_name) as worker_client:
+                    worker_client.sudo("bash -lc " + repr(shell), raise_on_error=False)
+                    logger.info("Worker gateway NAT removido en %s: %s", worker_name, ifname)
+            except Exception as exc:
+                logger.warning("No se pudo remover worker gateway NAT en %s: %s", worker_name, exc)
 
 
     def _build_graph_interfaces(self, slice_id: str, nodes: list[dict], links: list[dict], vlan_base: int, internet_mode: str):
@@ -899,38 +1205,76 @@ class LinuxDriver:
 
         created_nodes = []
         vm_results = []
+        ssh_forwards_by_vm: dict[str, dict] = {}
         nat_ready = False
         dhcp_ready: list[dict] = []
 
         try:
+            # Internet headnode_nat se prepara en el worker donde vive la VM.
+            # El headnode no aloja slices; solo publica el puerto externo.
+            if nat_meta and nat_meta.get("enabled"):
+                if nat_meta.get("mode") == "provider_network":
+                    nat_ready = True
+                else:
+                    reservations_by_name = {
+                        item.get("name"): item
+                        for item in nat_meta.get("reservations", [])
+                        if item.get("name")
+                    }
+
+                    internet_workers: dict[str, list[dict]] = {}
+                    for node in nodes:
+                        if node.get("internet"):
+                            internet_workers.setdefault(node["server"], []).append(node)
+
+                    worker_gateways = []
+
+                    for worker_name, worker_nodes in internet_workers.items():
+                        worker_reservations = [
+                            reservations_by_name[node["name"]]
+                            for node in worker_nodes
+                            if node["name"] in reservations_by_name
+                        ]
+
+                        with self._worker_client(worker_name) as worker_client:
+                            worker_net_mgr = NetworkManager(worker_client)
+
+                            if nat_meta.get("use_dhcp"):
+                                worker_net_mgr.ensure_vlan_dhcp(
+                                    ifname=nat_meta["ifname"],
+                                    vlan_id=nat_meta["vlan_id"],
+                                    subnet_cidr=nat_meta["subnet_cidr"],
+                                    gateway_ip_cidr=nat_meta["gateway_ip_cidr"],
+                                    reservations=worker_reservations,
+                                    provide_router=True,
+                                    provide_dns=True,
+                                    enable_nat=True,
+                                )
+                            else:
+                                worker_net_mgr.ensure_headnode_nat(
+                                    ifname=nat_meta["ifname"],
+                                    vlan_id=nat_meta["vlan_id"],
+                                    headnode_ip_cidr=nat_meta["gateway_ip_cidr"],
+                                    subnet_cidr=nat_meta["subnet_cidr"],
+                                )
+
+                        worker_gateways.append(
+                            {
+                                "worker": worker_name,
+                                "ifname": nat_meta["ifname"],
+                                "vlan_id": nat_meta["vlan_id"],
+                                "subnet_cidr": nat_meta["subnet_cidr"],
+                                "gateway_ip_cidr": nat_meta["gateway_ip_cidr"],
+                                "use_dhcp": nat_meta.get("use_dhcp", False),
+                                "reservations": worker_reservations,
+                            }
+                        )
+
+                    nat_meta["worker_gateways"] = worker_gateways
+                    nat_ready = True
+
             with self._headnode_client() as headnode:
                 net_mgr = NetworkManager(headnode)
-
-                if nat_meta and nat_meta.get("enabled"):
-                    if nat_meta.get("mode") == "provider_network":
-                        # Conectar TAPs al OFS sin tag — no se configura nada en el headnode
-                        # El Gateway físico maneja el routing
-                        nat_ready = True
-                    elif nat_meta.get("use_dhcp"):
-                        net_mgr.ensure_vlan_dhcp(
-                            ifname=nat_meta["ifname"],
-                            vlan_id=nat_meta["vlan_id"],
-                            subnet_cidr=nat_meta["subnet_cidr"],
-                            gateway_ip_cidr=nat_meta["gateway_ip_cidr"],
-                            reservations=nat_meta.get("reservations", []),
-                            provide_router=True,
-                            provide_dns=True,
-                            enable_nat=True,
-                        )
-                        nat_ready = True
-                    else:
-                        net_mgr.ensure_headnode_nat(
-                            ifname=nat_meta["ifname"],
-                            vlan_id=nat_meta["vlan_id"],
-                            headnode_ip_cidr=nat_meta["gateway_ip_cidr"],
-                            subnet_cidr=nat_meta["subnet_cidr"],
-                        )
-                        nat_ready = True
 
                 for dhcp in dhcp_networks:
                     net_mgr.ensure_vlan_dhcp(
@@ -946,12 +1290,13 @@ class LinuxDriver:
                     dhcp_ready.append(dhcp)
 
                 if nat_meta and nat_meta.get("enabled") and nat_meta.get("mode") != "provider_network":
-                    self._ensure_graph_ssh_forwards(
+                    forwards = self._ensure_graph_ssh_forwards(
                         headnode=headnode,
                         nat_meta=nat_meta,
                         nodes=nodes,
                         node_interfaces=node_interfaces,
                     )
+                    ssh_forwards_by_vm = {item["vm"]: item for item in forwards}
 
             for node in nodes:
                 name = node["name"]
@@ -1008,6 +1353,7 @@ class LinuxDriver:
                             status=status,
                             error=None,
                             interfaces=node_interfaces[name],
+                            ssh_forward=ssh_forwards_by_vm.get(name),
                         )
                     )
                     created_nodes.append({**node, "interfaces": node_interfaces[name]})
@@ -1020,20 +1366,79 @@ class LinuxDriver:
                             status="error",
                             error=str(exc),
                             interfaces=node_interfaces[name],
+                            ssh_forward=ssh_forwards_by_vm.get(name),
                         )
                     )
                     raise
 
-            # R5 — OVS flows para aislar broadcasts por VLAN
+            # R6 — switch dinámico: limitar broadcast por enlace virtual
+            # Cada VLAN se instala solo en los workers que realmente tienen VMs conectadas a ese enlace.
             try:
-                vlan_ids = [link["vlan_id"] for link in links_out]
-                if nat_meta and nat_meta.get("enabled"):
-                    vlan_ids.append(nat_meta["vlan_id"])
-                with self._headnode_client() as headnode:
-                    NetworkManager(headnode).apply_slice_flows(slice_id, vlan_ids)
-                logger.info("OVS flows aplicados para slice %s VLANs=%s", slice_id, vlan_ids)
+                node_by_name = {node['name']: node for node in nodes}
+                vlan_workers: dict[int, set[str]] = {}
+
+                # Para cada enlace virtual, calcular exactamente qué workers participan.
+                for link in links_out:
+                    vlan_id = int(link['vlan_id'])
+                    workers = vlan_workers.setdefault(vlan_id, set())
+
+                    for endpoint in (link.get('from'), link.get('to')):
+                        node = node_by_name.get(endpoint)
+                        if node and node.get('server'):
+                            workers.add(node['server'])
+
+                # Si hay NAT/Internet, la VLAN de NAT solo se instala en workers con VMs que requieren internet.
+                if nat_meta and nat_meta.get('enabled') and nat_meta.get('vlan_id'):
+                    nat_vlan = int(nat_meta['vlan_id'])
+                    nat_workers = {
+                        gateway.get('worker')
+                        for gateway in nat_meta.get('worker_gateways', [])
+                        if gateway.get('worker')
+                    }
+
+                    if not nat_workers:
+                        nat_workers = {
+                            node.get('server')
+                            for node in nodes
+                            if node.get('internet') and node.get('server')
+                        }
+
+                    if nat_workers:
+                        vlan_workers.setdefault(nat_vlan, set()).update(nat_workers)
+
+                # Aplicar reglas OVS por VLAN únicamente en los workers necesarios.
+                for vlan_id, workers in sorted(vlan_workers.items()):
+                    worker_list = sorted(workers)
+                    for worker_name in worker_list:
+                        with self._worker_client(worker_name) as worker_client:
+                            NetworkManager(worker_client).apply_slice_flows(slice_id, [vlan_id])
+
+                    print(
+                        f"[LINUX_SWITCH] VLAN {vlan_id} limitada a workers={worker_list}",
+                        flush=True,
+                    )
+
+                # El headnode solo recibe las VLANs donde participa por DHCP/NAT.
+                headnode_vlans = {int(item['vlan_id']) for item in dhcp_networks if item.get('vlan_id') is not None}
+                if nat_meta and nat_meta.get('enabled') and nat_meta.get('mode') != 'provider_network' and nat_meta.get('vlan_id'):
+                    headnode_vlans.add(int(nat_meta['vlan_id']))
+
+                if headnode_vlans:
+                    with self._headnode_client() as headnode:
+                        NetworkManager(headnode).apply_slice_flows(slice_id, sorted(headnode_vlans))
+                    print(
+                        f"[LINUX_SWITCH] VLANs del headnode para DHCP/NAT slice={slice_id}, vlans={sorted(headnode_vlans)}",
+                        flush=True,
+                    )
+
+                print(
+                    f"[LINUX_SECURITY] Seguridad/broadcast aplicado para slice={slice_id}, "
+                    f"vlan_workers={{v: sorted(w) for v, w in vlan_workers.items()}}",
+                    flush=True,
+                )
+
             except Exception as exc:
-                logger.warning("No se pudieron aplicar OVS flows para %s: %s", slice_id, exc)
+                logger.warning("No se pudieron aplicar reglas dinámicas de broadcast para %s: %s", slice_id, exc)
 
             return {
                 "slice_id": slice_id,
@@ -1061,6 +1466,9 @@ class LinuxDriver:
             }
 
     def delete_graph_slice(self, slice_id: str, vms: list[dict], nat: dict | None = None, dhcp: list[dict] | None = None) -> dict:
+        # block2.17 early worker gateway cleanup
+        self._remove_graph_worker_gateways(nat)
+
         if settings.deploy_mode == "dry_run":
             return {"slice_id": slice_id, "success": True, "mode": "dry_run"}
 
@@ -1084,6 +1492,7 @@ class LinuxDriver:
                         pass  # nada que limpiar en el headnode
                     else:
                         self._remove_graph_ssh_forwards(headnode, nat.get("ssh_forwards", []))
+                        self._remove_graph_worker_gateways(nat)
                         if nat.get("use_dhcp"):
                             net_mgr.remove_vlan_dhcp(
                                 ifname=nat["ifname"],
@@ -1102,20 +1511,59 @@ class LinuxDriver:
                         subnet_cidr=item["subnet_cidr"],
                         vlan_id=item["vlan_id"],
                     )
-                # R5 — eliminar OVS flows del slice
+                # R6 — eliminar reglas dinámicas de broadcast del slice
                 try:
-                    vlan_ids = set()
+                    vlan_workers: dict[int, set[str]] = {}
+
                     for vm in vms:
-                        for iface in vm.get("interfaces", []):
-                            if iface.get("vlan_id") is not None:
-                                vlan_ids.add(iface["vlan_id"])
-                    if nat and nat.get("enabled") and nat.get("vlan_id"):
-                        vlan_ids.add(nat["vlan_id"])
-                    if vlan_ids:
-                        net_mgr.remove_slice_flows(slice_id, list(vlan_ids))
-                        logger.info("OVS flows eliminados para slice %s", slice_id)
+                        worker_name = vm.get('server')
+                        if not worker_name:
+                            continue
+
+                        for iface in vm.get('interfaces', []):
+                            if iface.get('vlan_id') is not None:
+                                vlan_workers.setdefault(int(iface['vlan_id']), set()).add(worker_name)
+
+                    if nat and nat.get('enabled') and nat.get('vlan_id'):
+                        nat_vlan = int(nat['vlan_id'])
+                        nat_workers = {
+                            gateway.get('worker')
+                            for gateway in nat.get('worker_gateways', [])
+                            if gateway.get('worker')
+                        }
+                        if nat_workers:
+                            vlan_workers.setdefault(nat_vlan, set()).update(nat_workers)
+
+                    for vlan_id, workers in sorted(vlan_workers.items()):
+                        worker_list = sorted(workers)
+                        for worker_name in worker_list:
+                            with self._worker_client(worker_name) as worker_client:
+                                NetworkManager(worker_client).remove_slice_flows(slice_id, [vlan_id])
+
+                        print(
+                            f"[LINUX_SWITCH] VLAN {vlan_id} eliminada de workers={worker_list}",
+                            flush=True,
+                        )
+
+                    headnode_vlans = {int(item['vlan_id']) for item in dhcp or [] if item.get('vlan_id') is not None}
+                    if nat and nat.get('enabled') and nat.get('mode') != 'provider_network' and nat.get('vlan_id'):
+                        headnode_vlans.add(int(nat['vlan_id']))
+
+                    if headnode_vlans:
+                        net_mgr.remove_slice_flows(slice_id, sorted(headnode_vlans))
+                        print(
+                            f"[LINUX_SWITCH] VLANs del headnode eliminadas para slice={slice_id}, vlans={sorted(headnode_vlans)}",
+                            flush=True,
+                        )
+
+                    print(
+                        f"[LINUX_SECURITY] Seguridad/broadcast eliminada para slice={slice_id}, "
+                        f"vlan_workers={{v: sorted(w) for v, w in vlan_workers.items()}}",
+                        flush=True,
+                    )
+
                 except Exception as exc:
-                    logger.warning("No se pudieron eliminar OVS flows para %s: %s", slice_id, exc)
+                    logger.warning("No se pudieron eliminar reglas dinámicas de broadcast para %s: %s", slice_id, exc)
         except Exception as exc:
             logger.error("Error borrando DHCP/NAT graph: %s", exc)
             success = False
@@ -1140,6 +1588,7 @@ class LinuxDriver:
                         pass  # nada que limpiar en el headnode
                     else:
                         self._remove_graph_ssh_forwards(headnode, nat.get("ssh_forwards", []))
+                        self._remove_graph_worker_gateways(nat)
 
                         if nat.get("use_dhcp"):
                             net_mgr.remove_vlan_dhcp(

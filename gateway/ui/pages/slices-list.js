@@ -28,7 +28,7 @@ export async function renderSlicesList(container) {
         "div",
         {},
         h("h1", {}, "Slices"),
-        h("div", { class: "page-subtitle" }, "Topologías de red desplegadas")
+        h("div", { class: "page-subtitle" }, "Borradores y topologías de red desplegadas")
       ),
       canWrite()
         ? h("a", { href: "#/slices/new", class: "btn btn-primary" }, "+ Nuevo slice")
@@ -88,6 +88,7 @@ export async function renderSlicesList(container) {
 
   for (const slice of slices) {
     const vms = slice.vms || [];
+    const nodeCount = slice.state === "draft" ? (slice.nodes || []).length : vms.length;
     const isOwner = slice.owner_username === user.username;
     const isPending = PENDING_STATES.has(slice.state);
 
@@ -105,9 +106,11 @@ export async function renderSlicesList(container) {
         h(
           "td",
           {},
-          h("span", { class: "mono" }, String(vms.length)),
+          h("span", { class: "mono" }, String(nodeCount)),
           " ",
-          ...vms.slice(0, 3).map((vm) => statusBadge(vm.status))
+          ...(slice.state === "draft"
+            ? [h("span", { class: "text-faint" }, "definidas")]
+            : vms.slice(0, 3).map((vm) => statusBadge(vm.status)))
         ),
         h(
           "td",
@@ -124,6 +127,31 @@ export async function renderSlicesList(container) {
             { href: `#/slices/${encodeURIComponent(slice.slice_name)}`, class: "btn btn-ghost btn-sm" },
             "Ver"
           ),
+          canWrite() && slice.state === "draft"
+            ? h(
+                "a",
+                { href: `#/slices/${encodeURIComponent(slice.slice_name)}/edit`, class: "btn btn-ghost btn-sm" },
+                "Editar"
+              )
+            : null,
+          h(
+            "button",
+            {
+              class: "btn btn-ghost btn-sm",
+              onClick: () => handleExport(slice.slice_name),
+            },
+            "Exportar"
+          ),
+          canWrite() && !isPending
+            ? h(
+                "button",
+                {
+                  class: "btn btn-ghost btn-sm",
+                  onClick: () => handleClone(slice.slice_name),
+                },
+                "Clonar"
+              )
+            : null,
           canWrite() && !isPending
             ? h(
                 "button",
@@ -155,6 +183,7 @@ function renderSliceStateBadge(state) {
     deleting: ["Borrando…", "#f0ad4e"],
     deferred: ["En cola", "#f0ad4e"],
     failed: ["Error", "#d9534f"],
+    draft: ["Borrador", "#6f7df3"],
     active: ["Activo", "#5cb85c"],
   };
   const [text, color] = labels[state] || labels.active;
@@ -165,6 +194,39 @@ function renderSliceStateBadge(state) {
     },
     text
   );
+}
+
+
+async function handleExport(sliceName) {
+  try {
+    const payload = await SliceApi.exportGraphSlice(sliceName);
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${sliceName}.topology.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Topología "${sliceName}" exportada`, "success");
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function handleClone(sliceName) {
+  const newName = window.prompt("Nombre del nuevo borrador:", `${sliceName}-copia`)?.trim();
+  if (!newName) return;
+  try {
+    await SliceApi.cloneGraphSlice(sliceName, newName);
+    showToast(`Slice clonado como borrador "${newName}"`, "success");
+    window.location.hash = `#/slices/${encodeURIComponent(newName)}/edit`;
+  } catch (err) {
+    showError(err);
+  }
 }
 
 async function handleDelete(sliceName, container) {
@@ -180,27 +242,21 @@ async function handleDelete(sliceName, container) {
     // El backend ahora encola el borrado (202 Accepted, status:"deleting")
     // en lugar de borrarlo de forma síncrona. El worker RQ hace el borrado
     // físico real (VMs, redes, OVS flows) en background.
-    await SliceApi.deleteGraphSlice(sliceName);
+    const result = await SliceApi.deleteGraphSlice(sliceName);
+    if (result?.immediate || result?.status === "deleted") {
+      showToast(`Borrador "${sliceName}" eliminado`, "success");
+      await renderSlicesList(container);
+      return;
+    }
+
     showToast(`Borrado de "${sliceName}" encolado, esto puede tardar unos segundos…`, "info");
-
-    // Refrescamos la tabla de inmediato para que el slice aparezca con su
-    // badge "Borrando…" (en vez de seguir mostrando el estado anterior
-    // como si nada hubiera pasado, y sin el botón "Borrar" duplicado).
     await renderSlicesList(container);
-
-    // Polling en segundo plano: cuando el worker termine, refrescamos la
-    // tabla otra vez para que el slice desaparezca solo, sin que el
-    // usuario tenga que recargar la página manualmente (F5).
     SliceApi.pollUntilDone(sliceName, { intervalMs: 2500, maxAttempts: 40 })
       .then(() => {
         showToast(`Slice "${sliceName}" borrado`, "success");
         renderSlicesList(container);
       })
-      .catch((err) => {
-        // Si falla o expira el polling, igual refrescamos para reflejar
-        // el estado más reciente (puede haber quedado en "failed").
-        renderSlicesList(container);
-      });
+      .catch(() => renderSlicesList(container));
   } catch (err) {
     showError(err);
   }
