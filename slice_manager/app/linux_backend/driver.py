@@ -1273,21 +1273,52 @@ exit 0
                     nat_meta["worker_gateways"] = worker_gateways
                     nat_ready = True
 
+            # DHCP por worker: el dnsmasq se instala en el mismo worker donde
+            # vive cada VM. El headnode NO tiene trunk hacia los workers —
+            # el broadcast DHCP no cruza entre OVS bridges aislados, así que
+            # el dnsmasq debe correr local en el host que tiene la VM.
+            #
+            # Lógica: por cada dhcp_network, identificamos qué workers tienen
+            # VMs participantes en ese link (via reservations[].name → node →
+            # server), e instalamos el dnsmasq en cada uno de esos workers.
+            # Resultado: cada worker tiene su propio dnsmasq para las VLANs
+            # que le corresponden, y el broadcast nunca necesita cruzar.
+            _dhcp_workers: dict[str, list[dict]] = {}  # worker_name → [dhcp, ...]
+            _node_to_server = {node["name"]: node["server"] for node in nodes}
+            for _dhcp in dhcp_networks:
+                _seen_workers: set[str] = set()
+                for _res in _dhcp.get("reservations", []):
+                    _worker = _node_to_server.get(_res.get("name", ""))
+                    if _worker and _worker not in _seen_workers:
+                        _dhcp_workers.setdefault(_worker, []).append(_dhcp)
+                        _seen_workers.add(_worker)
+
+            for _worker_name, _worker_dhcps in _dhcp_workers.items():
+                try:
+                    with self._worker_client(_worker_name) as _wclient:
+                        _wnet = NetworkManager(_wclient)
+                        for _dhcp in _worker_dhcps:
+                            _wnet.ensure_vlan_dhcp(
+                                ifname=_dhcp["ifname"],
+                                vlan_id=_dhcp["vlan_id"],
+                                subnet_cidr=_dhcp["subnet_cidr"],
+                                gateway_ip_cidr=_dhcp["gateway_ip_cidr"],
+                                reservations=_dhcp["reservations"],
+                                provide_router=_dhcp.get("provide_router", False),
+                                provide_dns=_dhcp.get("provide_dns", False),
+                                enable_nat=_dhcp.get("enable_nat", False),
+                            )
+                            if _dhcp not in dhcp_ready:
+                                dhcp_ready.append(_dhcp)
+                    logger.info("DHCP instalado en worker %s para VLANs %s",
+                                _worker_name,
+                                [d["vlan_id"] for d in _worker_dhcps])
+                except Exception as _exc:
+                    logger.warning("No se pudo instalar DHCP en worker %s: %s",
+                                   _worker_name, _exc)
+
             with self._headnode_client() as headnode:
                 net_mgr = NetworkManager(headnode)
-
-                for dhcp in dhcp_networks:
-                    net_mgr.ensure_vlan_dhcp(
-                        ifname=dhcp["ifname"],
-                        vlan_id=dhcp["vlan_id"],
-                        subnet_cidr=dhcp["subnet_cidr"],
-                        gateway_ip_cidr=dhcp["gateway_ip_cidr"],
-                        reservations=dhcp["reservations"],
-                        provide_router=dhcp.get("provide_router", False),
-                        provide_dns=dhcp.get("provide_dns", False),
-                        enable_nat=dhcp.get("enable_nat", False),
-                    )
-                    dhcp_ready.append(dhcp)
 
                 if nat_meta and nat_meta.get("enabled") and nat_meta.get("mode") != "provider_network":
                     forwards = self._ensure_graph_ssh_forwards(
@@ -1505,12 +1536,29 @@ exit 0
                                 subnet_cidr=nat["subnet_cidr"],
                             )
 
-                for item in dhcp or []:
-                    net_mgr.remove_vlan_dhcp(
-                        ifname=item["ifname"],
-                        subnet_cidr=item["subnet_cidr"],
-                        vlan_id=item["vlan_id"],
-                    )
+                # DHCP se instaló en workers (no headnode) — limpiar en cada worker.
+                _del_node_to_server = {vm.get("name", ""): vm.get("server", "") for vm in vms}
+                _del_dhcp_workers: dict[str, list[dict]] = {}
+                for _item in dhcp or []:
+                    _seen_w: set[str] = set()
+                    for _res in _item.get("reservations", []):
+                        _w = _del_node_to_server.get(_res.get("name", ""), "")
+                        if _w and _w not in _seen_w:
+                            _del_dhcp_workers.setdefault(_w, []).append(_item)
+                            _seen_w.add(_w)
+                for _w_name, _w_items in _del_dhcp_workers.items():
+                    try:
+                        with self._worker_client(_w_name) as _wc:
+                            _wnet = NetworkManager(_wc)
+                            for _item in _w_items:
+                                _wnet.remove_vlan_dhcp(
+                                    ifname=_item["ifname"],
+                                    subnet_cidr=_item["subnet_cidr"],
+                                    vlan_id=_item["vlan_id"],
+                                )
+                    except Exception as _exc:
+                        logger.warning("No se pudo limpiar DHCP en worker %s: %s", _w_name, _exc)
+
                 # R6 — eliminar reglas dinámicas de broadcast del slice
                 try:
                     vlan_workers: dict[int, set[str]] = {}
@@ -1645,4 +1693,3 @@ exit 0
             "action": action,
             "status": status,
         }
-
