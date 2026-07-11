@@ -263,12 +263,21 @@ class NetworkManager:
                 f"\"cookie={cookie},priority=100,dl_vlan={vlan_id},actions=normal\""
             )
 
-        # Drop defensivo para tráfico sin etiqueta VLAN.
-        drop_cookie = "0x00000001"
-        cmds.append(
-            f"ovs-ofctl add-flow {OVS_BRIDGE} "
-            f"\"cookie={drop_cookie},priority=10,dl_vlan=0xffff,actions=drop\" 2>/dev/null || true"
-        )
+        # NOTA sobre el drop defensivo:
+        # NO se puede usar `priority=10,dl_vlan=0xffff,actions=drop` porque en el
+        # pipeline de OpenFlow el tráfico de las VMs entra UNTAGGED por su puerto
+        # de acceso (el tag VLAN lo aplica el puerto, no la VM). Esa regla
+        # matchearía y descartaría TODO el tráfico legítimo de las VMs antes de
+        # que OVS le asigne su VLAN interna, rompiendo la conectividad L2 entre
+        # workers (el tráfico nunca llegaría al trunk ens4).
+        #
+        # El aislamiento entre slices ya está garantizado por:
+        #   1. Cada VM en su puerto de acceso con su tag VLAN (OVS solo entrega
+        #      tráfico de una VLAN a puertos de esa misma VLAN).
+        #   2. Las reglas priority=200/100 por dl_vlan que hacen `normal` solo
+        #      para las VLANs registradas del slice.
+        # Un drop global untagged no aporta aislamiento adicional y sí rompe el
+        # forwarding. Por eso se omite intencionalmente.
 
         script = "set -e\n" + "\n".join(cmds)
         self._sudo_bash(script)
