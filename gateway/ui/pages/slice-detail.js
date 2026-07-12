@@ -520,7 +520,12 @@ function normalizeSshForward(forward, vm) {
     credential_hint: credential,
     target_ip: forward.target_ip || forward.ssh_target_ip,
     external_endpoint: forward.external_endpoint || (host && port ? `${host}:${port}` : null),
-    ssh_command: host && port ? `ssh -p ${port} ${user}@${host}` : forward.ssh_command,
+    // El acceso real es un ProxyJump (cliente -> headnode:jump_port -> worker -> VM:22),
+    // así que se prioriza el ssh_command que arma el backend. Reconstruir un
+    // "ssh -p <ssh_port>" apuntaba por error al puerto del worker (p.ej. 5811 = server1).
+    ssh_command:
+      forward.ssh_command ||
+      (host && port ? `ssh -p ${port} ${user}@${host}` : null),
   };
 }
 
@@ -553,11 +558,14 @@ function getVmSshForward(slice, vm) {
 
 function sshCommandText(forward) {
   if (!forward) return null;
+  // Prioriza el comando ProxyJump que arma el backend (cliente -> headnode ->
+  // worker -> VM). Solo cae al "ssh -p" simple si no hay ssh_command.
+  if (forward.ssh_command) return forward.ssh_command;
   const host = forward.public_host || forward.ssh_host || forward.headnode_ip;
   const port = forward.ssh_port;
   const user = forward.ssh_user || "ubuntu";
   if (host && port) return `ssh -p ${port} ${user}@${host}`;
-  return forward.ssh_command || null;
+  return null;
 }
 
 function renderVmCard(slice, vm) {
