@@ -130,15 +130,12 @@ def _links_count_for_slice(s: dict) -> int:
     return max(len(links), 1)
 
 
-def next_free_vlan_base(links_needed: int = 1) -> int:
-    """Calcula un bloque de VLANs libre sin reservarlo todavía.
+def _compute_next_free_vlan_base(slices: list[dict], links_needed: int) -> int:
+    """Cálculo puro (sin lock) del siguiente bloque de VLANs libre.
 
-    Los borradores con vlan_base=None no consumen VLAN. El valor recién queda
-    reservado cuando el registro pasa a queued/active y se persiste.
+    Opera sobre una lista ya leída para poder reutilizarse dentro de una
+    sección crítica sin volver a tomar el lock.
     """
-    with _locked(exclusive=False):
-        slices = _read_unlocked()
-
     max_vlan_used = VLAN_MIN - 1
     for s in slices:
         base = s.get("vlan_base")
@@ -162,3 +159,89 @@ def next_free_vlan_base(links_needed: int = 1) -> int:
         )
 
     return candidate
+
+
+def _assert_vlan_base_free(
+    slices: list[dict], base: int, links_needed: int, ignore_name: str | None
+) -> None:
+    """Valida que un vlan_base explícito no solape con otro slice activo."""
+    requested_top = base + max(links_needed - 1, 0)
+    for item in slices:
+        if item.get("slice_name") == ignore_name:
+            continue
+        existing_base = item.get("vlan_base")
+        if not existing_base:
+            continue
+        existing_top = existing_base + max(_links_count_for_slice(item) - 1, 0)
+        if not (requested_top < existing_base or base > existing_top):
+            raise ValueError(
+                f"La VLAN base {base} solapa con el slice "
+                f"'{item.get('slice_name')}' (VLANs {existing_base}-{existing_top})."
+            )
+
+
+def next_free_vlan_base(links_needed: int = 1) -> int:
+    """Calcula un bloque de VLANs libre sin reservarlo todavía.
+
+    Los borradores con vlan_base=None no consumen VLAN. El valor recién queda
+    reservado cuando el registro pasa a queued/active y se persiste.
+
+    NOTA: para el despliegue usa mejor `reserve_vlan_base_and_add`, que hace el
+    cálculo y la persistencia de forma atómica y evita la carrera entre dos
+    deploys concurrentes que leerían el mismo bloque "libre".
+    """
+    with _locked(exclusive=False):
+        slices = _read_unlocked()
+    return _compute_next_free_vlan_base(slices, links_needed)
+
+
+def reserve_vlan_base_and_add(
+    item: dict,
+    *,
+    links_needed: int,
+    explicit_base: int | None = None,
+    ignore_name: str | None = None,
+) -> dict:
+    """Reserva `vlan_base` y persiste el registro de forma ATÓMICA.
+
+    Todo ocurre dentro de un único lock EXCLUSIVO: leer el estado, validar el
+    nombre, calcular (o validar) el bloque de VLANs y escribirlo. Así dos
+    deploys simultáneos nunca obtienen el mismo bloque ni se pisan las VLANs.
+
+    - Si `explicit_base` viene dado, se valida que no solape con otro slice.
+    - Si es None, se calcula el siguiente bloque libre.
+    - Si ya existe un registro con el mismo nombre (p.ej. un borrador que se
+      despliega), se REEMPLAZA en el sitio; en caso contrario se agrega.
+    - `ignore_name` permite que un borrador que se está desplegando no choque
+      consigo mismo en la comprobación de nombre único.
+
+    Devuelve el registro finalmente persistido, con `vlan_base` ya asignado.
+    """
+    name = item.get("slice_name")
+    with _locked(exclusive=True):
+        data = _read_unlocked()
+
+        for x in data:
+            other = x.get("slice_name")
+            if other == name and other != ignore_name:
+                raise ValueError(f"Ya existe un slice con nombre {name!r}")
+
+        if explicit_base is not None:
+            base = int(explicit_base)
+            _assert_vlan_base_free(data, base, links_needed, ignore_name)
+        else:
+            base = _compute_next_free_vlan_base(data, links_needed)
+
+        stored = {**item, "vlan_base": base}
+
+        idx = next(
+            (i for i, x in enumerate(data) if x.get("slice_name") == name),
+            None,
+        )
+        if idx is not None:
+            data[idx] = stored
+        else:
+            data.append(stored)
+
+        _write_unlocked(data)
+        return stored

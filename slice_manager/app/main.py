@@ -35,6 +35,7 @@ from .state_store import (
     list_slices,
     replace_slice,
     next_free_vlan_base,
+    reserve_vlan_base_and_add,
 )
 
 app = FastAPI(title="PUCP Slice Manager", version="0.6.0")
@@ -480,6 +481,20 @@ def _assign_vlan_for_deploy(
     return payload
 
 
+def _vlan_slots_needed(payload: GraphSliceCreateRequest) -> int:
+    """Cuántas VLANs contiguas reservar para el slice.
+
+    Una por enlace. Si además habrá NAT de headnode, el driver ubica la VLAN de
+    NAT en `vlan_base + len(links) + 1`, así que reservamos hasta ahí para que
+    dos slices concurrentes no se pisen esa VLAN.
+    """
+    slots = len(payload.links)
+    needs_nat = payload.internet_mode == "headnode_nat" and any(
+        getattr(n, "internet", False) for n in payload.nodes
+    )
+    return slots + (2 if needs_nat else 0)
+
+
 def _enqueue_create_job(
     payload: GraphSliceCreateRequest,
     *,
@@ -574,7 +589,6 @@ async def deploy_graph_slice_draft(
     assert_can_act(user, found)
 
     payload = GraphSliceCreateRequest(**_normalise_topology_from_slice(found))
-    payload = _assign_vlan_for_deploy(payload, ignore_name=slice_name)
     queued = _queued_record(
         payload,
         owner_username=found.get("owner_username") or user["sub"],
@@ -583,7 +597,19 @@ async def deploy_graph_slice_draft(
         created_by=found.get("created_by") or user["sub"],
         created_at=found.get("created_at"),
     )
-    replace_slice(slice_name, queued)
+    # Reemplaza el borrador por el registro 'queued' y reserva vlan_base de
+    # forma atómica (ignora su propio nombre, que ya existe como draft).
+    try:
+        queued = reserve_vlan_base_and_add(
+            queued,
+            links_needed=_vlan_slots_needed(payload),
+            explicit_base=payload.vlan_base,
+            ignore_name=slice_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    payload = payload.model_copy(update={"vlan_base": queued["vlan_base"]})
     try:
         job = _enqueue_create_job(
             payload,
@@ -680,7 +706,6 @@ async def create_graph_slice(
     user: dict = Depends(require_write_access),
 ):
     _ensure_slice_name_available(payload.slice_name)
-    payload = _assign_vlan_for_deploy(payload)
 
     owner_username, curso_id = resolve_owner_for_create(
         user, payload.owner_username, payload.curso_id
@@ -693,8 +718,19 @@ async def create_graph_slice(
         curso_id=curso_id,
         created_by=user["sub"],
     )
+    # Reserva de vlan_base + persistencia ATÓMICA (un único lock exclusivo).
+    # Evita que dos deploys concurrentes obtengan el mismo bloque de VLANs.
     try:
-        add_slice(queued)
+        queued = reserve_vlan_base_and_add(
+            queued,
+            links_needed=_vlan_slots_needed(payload),
+            explicit_base=payload.vlan_base,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    payload = payload.model_copy(update={"vlan_base": queued["vlan_base"]})
+    try:
         job = _enqueue_create_job(
             payload,
             owner_username=owner_username,
@@ -702,8 +738,6 @@ async def create_graph_slice(
             curso_id=curso_id,
             created_by=user["sub"],
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         remove_slice(payload.slice_name)
         raise HTTPException(status_code=503, detail=f"No se pudo encolar el despliegue: {exc}") from exc

@@ -1181,6 +1181,11 @@ exit 0
             internet_mode=internet_mode,
         )
 
+        # Mapa nodo→worker (todos los nodos, no solo los ya creados). Se usa para
+        # ubicar el dnsmasq y para que el rollback limpie el DHCP en el worker
+        # correcto aunque falle antes de crear todas las VMs.
+        graph_node_servers = {node["name"]: node["server"] for node in nodes}
+
         if settings.deploy_mode == "dry_run":
             vms = []
             for node in nodes:
@@ -1283,15 +1288,28 @@ exit 0
             # server), e instalamos el dnsmasq en cada uno de esos workers.
             # Resultado: cada worker tiene su propio dnsmasq para las VLANs
             # que le corresponden, y el broadcast nunca necesita cruzar.
+            #
+            # IMPORTANTE (fix): un enlace cuyos dos extremos caen en workers
+            # distintos comparte una única VLAN que, gracias al trunk ens4, es
+            # un solo dominio de broadcast entre workers (es el mismo motivo por
+            # el que el ARP/ping cruza). Por eso instalamos el dnsmasq en UN SOLO
+            # worker "dueño" por red DHCP: el DISCOVER del extremo remoto llega
+            # por el trunk. Instalarlo en cada worker duplicaba el servidor DHCP
+            # y la IP .1 del gateway en el mismo segmento L2 (conflicto de ARP).
+            # El dueño se elige de forma determinística (worker de menor nombre)
+            # para que el borrado/rollback lo puedan recalcular.
             _dhcp_workers: dict[str, list[dict]] = {}  # worker_name → [dhcp, ...]
-            _node_to_server = {node["name"]: node["server"] for node in nodes}
+            _node_to_server = graph_node_servers
             for _dhcp in dhcp_networks:
-                _seen_workers: set[str] = set()
-                for _res in _dhcp.get("reservations", []):
-                    _worker = _node_to_server.get(_res.get("name", ""))
-                    if _worker and _worker not in _seen_workers:
-                        _dhcp_workers.setdefault(_worker, []).append(_dhcp)
-                        _seen_workers.add(_worker)
+                _candidate_workers = sorted({
+                    _node_to_server.get(_res.get("name", ""))
+                    for _res in _dhcp.get("reservations", [])
+                    if _node_to_server.get(_res.get("name", ""))
+                })
+                if not _candidate_workers:
+                    continue
+                _owner = _candidate_workers[0]
+                _dhcp_workers.setdefault(_owner, []).append(_dhcp)
 
             for _worker_name, _worker_dhcps in _dhcp_workers.items():
                 try:
@@ -1484,7 +1502,7 @@ exit 0
 
         except Exception as exc:
             logger.exception("Fallo creando graph slice %s", slice_id)
-            self._rollback_graph(created_nodes, nat_meta if nat_ready else None, dhcp_ready, slice_id=slice_id)
+            self._rollback_graph(created_nodes, nat_meta if nat_ready else None, dhcp_ready, slice_id=slice_id, node_servers=graph_node_servers)
             return {
                 "slice_id": slice_id,
                 "success": False,
@@ -1618,7 +1636,7 @@ exit 0
 
         return {"slice_id": slice_id, "success": success}
 
-    def _rollback_graph(self, created_nodes: list[dict], nat: dict | None = None, dhcp: list[dict] | None = None, slice_id: str = ""):
+    def _rollback_graph(self, created_nodes: list[dict], nat: dict | None = None, dhcp: list[dict] | None = None, slice_id: str = "", node_servers: dict | None = None):
         for node in reversed(created_nodes):
             try:
                 with self._worker_client(node["server"]) as client:
@@ -1627,37 +1645,54 @@ exit 0
             except Exception as exc:
                 logger.error("Rollback graph VM %s falló: %s", node["name"], exc)
 
+        # NAT/SSH forwards viven en el headnode/workers-gateway: se limpian aparte.
         try:
             with self._headnode_client() as headnode:
                 net_mgr = NetworkManager(headnode)
-
-                if nat and nat.get("enabled"):
-                    if nat.get("mode") == "provider_network":
-                        pass  # nada que limpiar en el headnode
+                if nat and nat.get("enabled") and nat.get("mode") != "provider_network":
+                    self._remove_graph_ssh_forwards(headnode, nat.get("ssh_forwards", []))
+                    self._remove_graph_worker_gateways(nat)
+                    if nat.get("use_dhcp"):
+                        net_mgr.remove_vlan_dhcp(
+                            ifname=nat["ifname"],
+                            subnet_cidr=nat["subnet_cidr"],
+                            vlan_id=nat["vlan_id"],
+                        )
                     else:
-                        self._remove_graph_ssh_forwards(headnode, nat.get("ssh_forwards", []))
-                        self._remove_graph_worker_gateways(nat)
-
-                        if nat.get("use_dhcp"):
-                            net_mgr.remove_vlan_dhcp(
-                                ifname=nat["ifname"],
-                                subnet_cidr=nat["subnet_cidr"],
-                                vlan_id=nat["vlan_id"],
-                            )
-                        else:
-                            net_mgr.remove_headnode_nat(
-                                ifname=nat["ifname"],
-                                subnet_cidr=nat["subnet_cidr"],
-                            )
-
-                for item in dhcp or []:
-                    net_mgr.remove_vlan_dhcp(
-                        ifname=item["ifname"],
-                        subnet_cidr=item["subnet_cidr"],
-                        vlan_id=item["vlan_id"],
-                    )
+                        net_mgr.remove_headnode_nat(
+                            ifname=nat["ifname"],
+                            subnet_cidr=nat["subnet_cidr"],
+                        )
         except Exception as exc:
-            logger.error("Rollback DHCP/NAT falló: %s", exc)
+            logger.error("Rollback NAT falló: %s", exc)
+
+        # FIX: el DHCP se instala en los WORKERS (no en el headnode), así que el
+        # rollback también debe limpiarlo ahí. Se limpia en todos los workers que
+        # alojen un extremo de cada red DHCP (superconjunto del worker "dueño"):
+        # remove_vlan_dhcp es idempotente, en un worker sin dnsmasq es un no-op.
+        _rb_node_to_server = dict(node_servers or {})
+        if not _rb_node_to_server:
+            _rb_node_to_server = {n.get("name", ""): n.get("server", "") for n in created_nodes}
+
+        _rb_dhcp_workers: dict[str, list[dict]] = {}
+        for _item in dhcp or []:
+            for _res in _item.get("reservations", []):
+                _w = _rb_node_to_server.get(_res.get("name", ""), "")
+                if _w and _item not in _rb_dhcp_workers.setdefault(_w, []):
+                    _rb_dhcp_workers[_w].append(_item)
+
+        for _w_name, _w_items in _rb_dhcp_workers.items():
+            try:
+                with self._worker_client(_w_name) as _wc:
+                    _wnet = NetworkManager(_wc)
+                    for _item in _w_items:
+                        _wnet.remove_vlan_dhcp(
+                            ifname=_item["ifname"],
+                            subnet_cidr=_item["subnet_cidr"],
+                            vlan_id=_item["vlan_id"],
+                        )
+            except Exception as _exc:
+                logger.warning("Rollback: no se pudo limpiar DHCP en worker %s: %s", _w_name, _exc)
 
     def action_graph_vm(self, vm: dict, action: str) -> dict:
         action = (action or "").strip().lower()
