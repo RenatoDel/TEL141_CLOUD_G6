@@ -38,6 +38,7 @@ const IMAGE_CATALOG = {
   ],
   openstack: [
     { value: "cirros", label: "Cirros 0.6.2 (ligero, 256MB)", min_ram: 256, min_disk: 4 },
+    { value: "ubuntu-22.04", label: "Ubuntu 22.04 Server (completo)", min_ram: 1024, min_disk: 6 },
   ],
 };
 
