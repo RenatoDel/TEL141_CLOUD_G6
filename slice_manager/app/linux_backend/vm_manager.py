@@ -108,6 +108,7 @@ PY
         is_cirros: bool,
         loopback_cidr: str | None = None,
         enable_ip_forward: bool = False,
+        interfaces: list["VMInterface"] | None = None,
     ) -> str:
         cmds: list[str] = []
 
@@ -125,6 +126,25 @@ PY
                     "iptables -P OUTPUT ACCEPT 2>/dev/null || true",
                 ]
             )
+
+        # FIX: cirros usa dhcpcd y NO procesa el bloque network-interfaces del
+        # meta-data (formato ifupdown/ENI). Las rutas estáticas deben ir en
+        # runcmd, que cirros sí ejecuta vía cloud-init después del boot.
+        # Se espera a que DHCP asigne IP antes de agregar rutas (sleep 8).
+        if is_cirros and interfaces:
+            route_cmds: list[str] = []
+            for idx, iface in enumerate(interfaces):
+                guest_name = iface.set_name or f"eth{idx}"
+                for route in iface.static_routes:
+                    to = route.get("to")
+                    via = route.get("via")
+                    if to and via:
+                        route_cmds.append(
+                            f"ip route replace {to} via {via} dev {guest_name} 2>/dev/null || true"
+                        )
+            if route_cmds:
+                cmds.append("sleep 8")   # esperar que dhcpcd termine
+                cmds.extend(route_cmds)
 
         cmds.append("systemctl restart systemd-networkd 2>/dev/null || true")
         runcmd = "\n".join(f"  - [ sh, -lc, {cmd!r} ]" for cmd in cmds)
@@ -284,6 +304,7 @@ runcmd:
                 is_cirros,
                 config.loopback_cidr,
                 config.enable_ip_forward,
+                interfaces=interfaces,
             ),
         )
         self._write_remote_text(meta_data_path, self._build_meta_data(config.name, interfaces, is_cirros))
