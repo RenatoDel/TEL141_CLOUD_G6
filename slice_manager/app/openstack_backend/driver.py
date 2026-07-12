@@ -960,7 +960,7 @@ class OpenStackDriver:
             vm_results_by_index: dict[int, dict] = {}
             created_lock = Lock()
 
-            def _cloud_init_base(with_internet: bool) -> str:
+            def _cloud_init_base(with_internet: bool, hostname: str = "vm") -> str:
                 # #cloud-config compatible con Ubuntu (cloud-init completo) y con
                 # cirros. Fija la credencial ubuntu/ubuntu y habilita SSH por
                 # password (las cloud images no traen password por defecto).
@@ -972,8 +972,10 @@ class OpenStackDriver:
   - sh -c 'command -v dhclient >/dev/null 2>&1 && dhclient 2>/dev/null || true'
   - sh -c 'command -v udhcpc  >/dev/null 2>&1 && for I in $(ls /sys/class/net | grep -v lo); do udhcpc -i "$I" -n -q -T 3 -t 2 2>/dev/null || true; done'
 """
+                # El hostname sale del nombre real del nodo (vm1/vm2/vm3) para que
+                # el prompt de la consola no muestre un genérico "vm".
                 return f"""#cloud-config
-hostname: vm
+hostname: {hostname}
 manage_etc_hosts: true
 ssh_pwauth: true
 disable_root: false
@@ -985,6 +987,7 @@ chpasswd:
 users:
   - default
 runcmd:
+  - sh -c 'hostnamectl set-hostname {hostname} 2>/dev/null || hostname {hostname} 2>/dev/null || true'
   - sh -c 'echo "ubuntu:ubuntu" | chpasswd 2>/dev/null || true'{internet_block}
 """
 
@@ -1079,9 +1082,12 @@ runcmd:
                     )
 
                     # Todas las VMs reciben el cloud-init base (password
-                    # ubuntu/ubuntu + SSH pwauth). Las que tienen internet
-                    # además levantan sus interfaces por DHCP.
-                    vm_user_data = _cloud_init_base(with_internet=bool(node.get("internet")))
+                    # ubuntu/ubuntu + SSH pwauth) con su hostname real. Las que
+                    # tienen internet además levantan sus interfaces por DHCP.
+                    vm_user_data = _cloud_init_base(
+                        with_internet=bool(node.get("internet")),
+                        hostname=node_name,
+                    )
 
                     server = self.client.create_server(
                         name=node_name,
@@ -1108,6 +1114,27 @@ runcmd:
 
                 console_url = self.client.get_console_url(server_id, scoped_token)
 
+                # Datos de acceso SSH externo (solo si la VM tiene IP external).
+                # Acceso vía ProxyJump por el gateway → HeadNode → VM, ya que el
+                # HeadNode tiene ruta a la red external 10.60.x.
+                ssh_command = None
+                ssh_user = None
+                ssh_credential_hint = None
+                if external_ip:
+                    _img = str(node.get("image_name", "")).lower()
+                    if "cirros" in _img:
+                        ssh_user = "cirros"
+                        ssh_credential_hint = "cirros / gocubsgo"
+                    else:
+                        ssh_user = "ubuntu"
+                        ssh_credential_hint = "ubuntu / ubuntu"
+                    jump_host = settings.os_ssh_public_host or settings.headnode_ssh_host
+                    jump_port = settings.os_headnode_jump_port
+                    jump_user = settings.os_jump_user
+                    ssh_command = (
+                        f"ssh -J {jump_user}@{jump_host}:{jump_port} {ssh_user}@{external_ip}"
+                    )
+
                 vm_result = {
                     "vm_id": node_name,
                     "name": node_name,
@@ -1124,6 +1151,10 @@ runcmd:
                     "disk_gb": node.get("disk_gb", 4),
                     "internet": node.get("internet", False),
                     "external_ip": external_ip,
+                    "ssh_command": ssh_command,
+                    "ssh_user": ssh_user,
+                    "ssh_target_ip": external_ip,
+                    "ssh_credential_hint": ssh_credential_hint,
                     "project_id": project_id,
                 }
                 return vm_index, vm_result

@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     # Si linux_ssh_public_host queda vacío, se usa headnode_ssh_host.
     linux_ssh_public_host: str = ""
     linux_ssh_start_port: int = 2200
+
+    # Acceso SSH externo a VMs OpenStack: se hace por ProxyJump a través del
+    # gateway hacia el HeadNode (que sí tiene ruta a la red external 10.60.x).
+    # os_ssh_public_host = IP del gateway; os_headnode_jump_port = puerto del
+    # HeadNode en el gateway (5821 según la guía del lab).
+    os_ssh_public_host: str = ""
+    os_headnode_jump_port: int = 5821
+    os_jump_user: str = "ubuntu"
     image_sync_cache_dir: str = "/tmp/pucp-image-cache"
 
     @property
