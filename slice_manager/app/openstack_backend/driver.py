@@ -956,24 +956,36 @@ class OpenStackDriver:
             vm_results_by_index: dict[int, dict] = {}
             created_lock = Lock()
 
-            def _cloud_init_for_internet() -> str:
-                return """#!/bin/sh
-# Configurar interfaz de internet automáticamente
-sleep 5
-
-# Intentar levantar todas las interfaces salvo loopback
-for IFACE in $(ls /sys/class/net | grep -v lo); do
-    sudo ip link set "$IFACE" up 2>/dev/null || true
-done
-
-# Intentar DHCP en interfaces adicionales
-for IFACE in $(ls /sys/class/net | grep -v lo); do
-    sudo udhcpc -i "$IFACE" -n -q -T 3 -t 2 2>/dev/null || true
-done
-
-# Fallback para gateway del rango OpenStack G6
-ip route | grep -q default || sudo ip route add default via 10.60.14.1 2>/dev/null || true
+            def _cloud_init_base(with_internet: bool) -> str:
+                # #cloud-config compatible con Ubuntu (cloud-init completo) y con
+                # cirros. Fija la credencial ubuntu/ubuntu y habilita SSH por
+                # password (las cloud images no traen password por defecto).
+                # bootcmd/runcmd levantan las interfaces adicionales por DHCP.
+                internet_block = ""
+                if with_internet:
+                    internet_block = """
+  - sh -c 'for I in $(ls /sys/class/net | grep -v lo); do ip link set "$I" up 2>/dev/null || true; done'
+  - sh -c 'command -v dhclient >/dev/null 2>&1 && dhclient 2>/dev/null || true'
+  - sh -c 'command -v udhcpc  >/dev/null 2>&1 && for I in $(ls /sys/class/net | grep -v lo); do udhcpc -i "$I" -n -q -T 3 -t 2 2>/dev/null || true; done'
 """
+                return f"""#cloud-config
+hostname: vm
+manage_etc_hosts: true
+ssh_pwauth: true
+disable_root: false
+chpasswd:
+  expire: false
+  list: |
+    ubuntu:ubuntu
+    cirros:gocubsgo
+users:
+  - default
+runcmd:
+  - sh -c 'echo "ubuntu:ubuntu" | chpasswd 2>/dev/null || true'{internet_block}
+"""
+
+            def _cloud_init_for_internet() -> str:
+                return _cloud_init_base(with_internet=True)
 
             def _create_one_vm(vm_index: int, node: dict) -> tuple[int, dict]:
                 node_name = node["name"]
@@ -1062,7 +1074,10 @@ ip route | grep -q default || sudo ip route add default via 10.60.14.1 2>/dev/nu
                         node_name, len(port_ids), az or "auto"
                     )
 
-                    vm_user_data = _cloud_init_for_internet() if node.get("internet") else None
+                    # Todas las VMs reciben el cloud-init base (password
+                    # ubuntu/ubuntu + SSH pwauth). Las que tienen internet
+                    # además levantan sus interfaces por DHCP.
+                    vm_user_data = _cloud_init_base(with_internet=bool(node.get("internet")))
 
                     server = self.client.create_server(
                         name=node_name,
