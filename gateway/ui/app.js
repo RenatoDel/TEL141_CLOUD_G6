@@ -17,6 +17,7 @@ import { renderSliceDetail } from "./pages/slice-detail.js";
 import { renderMonitoring } from "./pages/monitoring.js";
 import { renderAdminUsers } from "./pages/admin-users.js";
 import { renderAdminCourses } from "./pages/admin-courses.js";
+import { renderImages } from "./pages/images.js";
 
 if (!requireAuth()) {
   // requireAuth ya redirigió a /login.html
@@ -30,6 +31,7 @@ if (!requireAuth()) {
   registerRoute("/slices/:name/edit", renderSliceEditor);
   registerRoute("/slices/:name", renderSliceDetail);
   registerRoute("/monitoring", renderMonitoring);
+  registerRoute("/images", renderImages);
   registerRoute("/admin/users", renderAdminUsers);
   registerRoute("/admin/courses", renderAdminCourses);
 

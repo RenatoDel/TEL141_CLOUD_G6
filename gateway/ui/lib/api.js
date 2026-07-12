@@ -127,6 +127,67 @@ export const AuthApi = {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// Imágenes  (prefijo /api/images → image_service vía gateway)
+// ════════════════════════════════════════════════════════════════════════
+export const ImageApi = {
+  list: () => request("/api/images"),
+
+  // Importa desde una URL http(s): el image_service la descarga por su cuenta
+  // (no pasa por el navegador ni por el disco del cliente). Usa Form fields.
+  importUrl: async ({ name, url, os_type = "linux", format = "qcow2" }) => {
+    const form = new FormData();
+    form.append("name", name);
+    form.append("url", url);
+    form.append("os_type", os_type);
+    form.append("format", format);
+    return _formRequest("/api/images/import-url", { method: "POST", body: form });
+  },
+
+  // Sube un archivo local (multipart) al image_service.
+  upload: async ({ name, file, os_type = "linux", format = "qcow2" }) => {
+    const form = new FormData();
+    form.append("name", name);
+    form.append("os_type", os_type);
+    form.append("format", format);
+    form.append("file", file);
+    return _formRequest("/api/images/upload", { method: "POST", body: form });
+  },
+
+  remove: (name) =>
+    request(`/api/images/${encodeURIComponent(name)}`, { method: "DELETE" }),
+};
+
+// Igual que request() pero para FormData (no fija Content-Type: el navegador
+// pone el boundary multipart solo). Reutiliza el mismo manejo de errores/401.
+async function _formRequest(path, { method = "POST", body } = {}) {
+  const token = getToken();
+  let response;
+  try {
+    response = await fetch(path, {
+      method,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body,
+    });
+  } catch (networkErr) {
+    throw new ApiError(0, "No se pudo conectar con el servidor", networkErr);
+  }
+  if (response.status === 401) {
+    logout();
+    throw new ApiError(401, "Sesión expirada", null);
+  }
+  const text = await response.text();
+  let data = null;
+  if (text) {
+    try { data = JSON.parse(text); } catch { data = text; }
+  }
+  if (!response.ok) {
+    const detail = data && data.detail !== undefined ? data.detail : data;
+    throw new ApiError(response.status, detail, data);
+  }
+  return data;
+}
+
+// ════════════════════════════════════════════════════════════════════════
 // Slices / monitoreo  (prefijo /api → slice_manager)
 // ════════════════════════════════════════════════════════════════════════
 export const SliceApi = {

@@ -34,7 +34,7 @@ import { navigate } from "../lib/router.js";
 const IMAGE_CATALOG = {
   linux: [
     { value: "cirros-base.img", label: "Cirros 0.6.2 (ligero, 256MB)", min_ram: 256, min_disk: 4 },
-    { value: "ubuntu-base.img", label: "Ubuntu 22.04 Server (completo)", min_ram: 1024, min_disk: 10 },
+    { value: "ubuntu-22.04", label: "Ubuntu 22.04 Server (completo)", min_ram: 1024, min_disk: 6 },
   ],
   openstack: [
     { value: "cirros", label: "Cirros 0.6.2 (ligero, 256MB)", min_ram: 256, min_disk: 4 },

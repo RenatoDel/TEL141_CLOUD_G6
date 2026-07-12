@@ -16,6 +16,8 @@ const NAV_ITEMS = [
   // Monitoreo: admin ve workers físicos; profesor/coach ven slices de sus
   // cursos; alumno NO ve monitoreo (solo sus propios slices desde Dashboard).
   { path: "/monitoring", label: "Monitoreo", icon: "▣", roles: ["admin", "profesor", "coach"] },
+  // Gestión de imágenes: recurso compartido del lab, solo admin.
+  { path: "/images", label: "Imágenes", icon: "▦", roles: ["admin"] },
 ];
 
 const ADMIN_NAV_ITEMS = [
