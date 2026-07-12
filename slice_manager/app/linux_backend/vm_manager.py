@@ -127,33 +127,44 @@ PY
                 ]
             )
 
-        # FIX: cirros usa dhcpcd y NO procesa el bloque network-interfaces del
-        # meta-data (formato ifupdown/ENI). Las rutas estáticas deben ir en
-        # runcmd, que cirros sí ejecuta vía cloud-init después del boot.
-        # Se espera a que DHCP asigne IP antes de agregar rutas (sleep 8).
+        cmds.append("systemctl restart systemd-networkd 2>/dev/null || true")
+        runcmd = "\n".join(f"  - [ sh, -lc, {cmd!r} ]" for cmd in cmds)
+
+        # Rutas estáticas para cirros: ni runcmd ni los hooks "up" de ifupdown
+        # funcionan porque cirros usa dhcpcd y su cloud-init es muy recortado.
+        # El mecanismo confiable es /etc/rc.local: cirros lo ejecuta en cada
+        # boot DESPUÉS de que dhcpcd asigna la IP. Usamos write_files para
+        # inyectarlo; el sleep garantiza que dhcpcd terminó antes de las rutas.
+        write_files_block = ""
         if is_cirros and interfaces:
-            route_cmds: list[str] = []
+            route_lines: list[str] = []
             for idx, iface in enumerate(interfaces):
                 guest_name = iface.set_name or f"eth{idx}"
                 for route in iface.static_routes:
-                    to = route.get("to")
-                    via = route.get("via")
-                    if to and via:
-                        route_cmds.append(
-                            f"ip route replace {to} via {via} dev {guest_name} 2>/dev/null || true"
+                    to_dst = route.get("to")
+                    via_gw = route.get("via")
+                    if to_dst and via_gw:
+                        route_lines.append(
+                            f"ip route replace {to_dst} via {via_gw} dev {guest_name} 2>/dev/null || true"
                         )
-            if route_cmds:
-                cmds.append("sleep 8")   # esperar que dhcpcd termine
-                cmds.extend(route_cmds)
-
-        cmds.append("systemctl restart systemd-networkd 2>/dev/null || true")
-        runcmd = "\n".join(f"  - [ sh, -lc, {cmd!r} ]" for cmd in cmds)
+            if route_lines:
+                rc_body = "#!/bin/sh\nsleep 10\n" + "\n".join(route_lines) + "\nexit 0\n"
+                # El bloque literal YAML (content: |) requiere 6 espacios de
+                # indentación relativa al key "content" (que está a 4 espacios).
+                rc_indented = "\n".join(f"      {l}" for l in rc_body.splitlines())
+                write_files_block = f"""
+write_files:
+  - path: /etc/rc.local
+    permissions: '0755'
+    content: |
+{rc_indented}
+"""
 
         if is_cirros:
             return f"""#cloud-config
 hostname: {vm_name}
 manage_etc_hosts: true
-
+{write_files_block}
 runcmd:
 {runcmd}
 """
