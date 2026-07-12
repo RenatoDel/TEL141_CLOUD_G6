@@ -890,7 +890,11 @@ class OpenStackDriver:
                 vlan_id = vlan_base + idx
                 net_name = f"net-{slice_id}-{link_id}"
                 subnet_name = f"sub-{slice_id}-{link_id}"
-                cidr = f"192.168.{100 + idx}.0/30"
+                # /29 (no /30): con DHCP habilitado, el agente DHCP de Neutron
+                # necesita su propia IP en la subnet. Un /30 solo tiene 2 IPs
+                # asignables (.1 y .2) → no cabe el agente + los 2 extremos.
+                # El /29 deja 6 asignables: agente DHCP + hasta 5 puertos.
+                cidr = f"192.168.{100 + idx}.0/29"
 
                 network = self.client.get_network_by_name(net_name, project_id, scoped_token)
                 if network:
@@ -915,7 +919,7 @@ class OpenStackDriver:
                 else:
                     subnet = self.client.create_subnet(
                         subnet_name, network["id"], cidr,
-                        scoped_token, project_id, enable_dhcp=False
+                        scoped_token, project_id, enable_dhcp=True
                     )
                     # Vincular subnet a la red recién creada para el rollback
                     for cn in created_networks:
