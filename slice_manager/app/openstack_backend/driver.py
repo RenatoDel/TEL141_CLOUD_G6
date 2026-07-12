@@ -1128,9 +1128,9 @@ runcmd:
                     else:
                         ssh_user = "ubuntu"
                         ssh_credential_hint = "ubuntu / ubuntu"
-                    jump_host = settings.os_ssh_public_host or settings.headnode_ssh_host
-                    jump_port = settings.os_headnode_jump_port
-                    jump_user = settings.os_jump_user
+                    jump_host = os.environ.get("OS_SSH_PUBLIC_HOST", "10.20.11.189")
+                    jump_port = os.environ.get("OS_HEADNODE_JUMP_PORT", "5821")
+                    jump_user = os.environ.get("OS_JUMP_USER", "ubuntu")
                     ssh_command = (
                         f"ssh -J {jump_user}@{jump_host}:{jump_port} {ssh_user}@{external_ip}"
                     )
