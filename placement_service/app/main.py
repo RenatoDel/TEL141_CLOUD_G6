@@ -288,33 +288,51 @@ def compute_effective_capacities(
     """
     Calcula cap_cpu, cap_ram_gb, cap_disk_gb para un worker.
 
-    El overcommit se ajusta por un estimador conservador de uso esperado:
-    avg + k*std, no solo el promedio. Dos workers con la misma media pero
-    distinta volatilidad reciben overcommit distinto — el más errático
-    queda más limitado (ver sección 4.5 de Solucion_VM_Placement_v5.docx).
+    CPU — overcommit dinámico ajustado por uso real (μ + kσ):
+      ratio_cpu = min(MAX_OC_CPU, 1 / uso_estimado_cpu)
+      cap_cpu   = cpu_libre_bd × ratio_cpu
+      Dos workers con la misma media pero distinta volatilidad reciben
+      overcommit distinto — el más errático queda más limitado.
 
-    En t=0 (sin compromisos ni historia): avg≈SO base (2-8%), std≈0,
-    el sistema se comporta igual que sin este ajuste.
+    RAM — sin overcommit (restricción dura):
+      cap_ram_gb = ram_total × (1 - avg_ram_instantaneo)
+      La RAM es incompresible: no hay overcommit. Usamos la RAM total del
+      worker (no la libre según BD) y la restamos con el uso REAL de Prometheus
+      (query basada en MemAvailable, no MemFree — Linux usa la memoria libre
+      para caché de disco, MemAvailable ya descuenta esa caché recuperable).
+      Así cuando un worker tiene 62% de uso real de RAM, su cap_ram baja a
+      38% del total, independientemente de lo que diga MariaDB.
+      Si avg_ram = OC_FALLBACK (Prometheus no disponible), se usa la reserva
+      estática de BD como fallback conservador.
+
+    DISCO — sin overcommit, exacto desde BD.
     """
     cpu_libre = worker["vcpus_total"] - worker["vcpus_used"]
-    ram_libre_gb = (worker["ram_total_mb"] - worker["ram_used_mb"]) / 1024.0
     disk_libre_gb = worker["storage_total_gb"] - worker["storage_used_gb"]
+    ram_total_gb = worker["ram_total_mb"] / 1024.0
 
     avg_cpu = prom.get("avg_cpu", OC_FALLBACK)
     avg_ram = prom.get("avg_ram", OC_FALLBACK)
     std_cpu = prom.get("std_cpu", 0.0)
-    std_ram = prom.get("std_ram", 0.0)
 
-    # Estimador conservador: media + k desviaciones estándar
+    # --- CPU: overcommit dinámico (igual que antes) ---
     uso_estimado_cpu = avg_cpu + RISK_FACTOR_K * std_cpu
-    uso_estimado_ram = avg_ram + RISK_FACTOR_K * std_ram
-
     ratio_cpu = min(MAX_OC_CPU, 1.0 / uso_estimado_cpu) if uso_estimado_cpu > 0.01 else 1.0
-    ratio_ram = min(MAX_OC_RAM, 1.0 / uso_estimado_ram) if uso_estimado_ram > 0.01 else 1.0
-
     cap_cpu = cpu_libre * ratio_cpu
-    cap_ram_gb = ram_libre_gb * ratio_ram
-    cap_disk_gb = disk_libre_gb  # disco: Opción A, siempre exacto sin overcommit
+
+    # --- RAM: capacidad real basada en Prometheus, sin overcommit ---
+    # Si Prometheus no está disponible (avg_ram == OC_FALLBACK), caemos al
+    # valor estático de BD para no penalizar incorrectamente.
+    if avg_ram >= OC_FALLBACK:
+        # Fallback: usar reserva de BD (comportamiento anterior)
+        ram_libre_bd = (worker["ram_total_mb"] - worker["ram_used_mb"]) / 1024.0
+        cap_ram_gb = ram_libre_bd
+    else:
+        # Fórmula correcta: ram_total × (1 - uso_real_prometheus)
+        cap_ram_gb = ram_total_gb * (1.0 - avg_ram)
+
+    # --- DISCO: sin overcommit, exacto ---
+    cap_disk_gb = disk_libre_gb
 
     return cap_cpu, cap_ram_gb, cap_disk_gb
 
