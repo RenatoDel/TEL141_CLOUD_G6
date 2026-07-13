@@ -408,6 +408,13 @@ class OpenStackClient:
         Crea un puerto. Idempotente: si ya existe uno con el mismo nombre se
         reutiliza. Ante un 409 (conflicto típico con subnet sin DHCP en redes
         VLAN provider) se busca y reutiliza el puerto existente en vez de fallar.
+
+        Port Security deshabilitado por diseño: los slices del orquestador
+        incluyen VMs que actúan como switches OVS (L2 forwarding). El anti-
+        spoofing de Neutron destruye paquetes cuya MAC/IP de origen no coincide
+        con el puerto — exactamente lo que hace un switch que reenvía tramas de
+        otras VMs. Con port_security_enabled=False + security_groups=[] el
+        tráfico L2 fluye libremente dentro del slice sin que Neutron interfiera.
         """
         existing = self.get_port_by_name(name, project_id, token)
         if existing:
@@ -419,6 +426,9 @@ class OpenStackClient:
             "network_id": network_id,
             "admin_state_up": True,
             "project_id": project_id,
+            # Deshabilitar anti-spoofing para permitir L2 forwarding (OVS switch)
+            "port_security_enabled": False,
+            "security_groups": [],
         }
         if fixed_ip:
             port["fixed_ips"] = [{"subnet_id": subnet_id, "ip_address": fixed_ip}]
@@ -436,7 +446,6 @@ class OpenStackClient:
             if existing:
                 logger.info("Puerto %s reutilizado tras 409: %s", name, existing["id"])
                 return existing
-            # No se encontró: ahora sí propagar el error con el body ya logueado.
             r.raise_for_status()
         return r.json()["port"]
 
@@ -822,9 +831,11 @@ class OpenStackDriver:
             "network_id": ext_network["id"],
             "admin_state_up": True,
             "project_id": project_id,
+            # Consistente con los puertos internos: sin anti-spoofing.
+            # El SG permisivo ya controla qué tráfico entra/sale por internet.
+            "port_security_enabled": False,
+            "security_groups": [],
         }
-        if sg_id:
-            port["security_groups"] = [sg_id]
 
         r = self.client._request(
             "POST", f"{self.client.neutron_url()}/v2.0/ports",
